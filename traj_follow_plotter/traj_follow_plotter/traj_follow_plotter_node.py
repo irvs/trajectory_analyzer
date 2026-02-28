@@ -25,6 +25,12 @@ import matplotlib.pyplot as plt
 # 例: package名が traj_recorder_msgs の場合
 from traj_recorder_msgs.action import TrajFollow
 
+# ===== FK/URDF 追加 (Humble向け: kdl_parser_py を使わず jvytee/kdl_parser を使用) =====
+import kdl_parser.urdf as kdl_urdf
+import PyKDL
+
+import traceback
+
 
 def pick_fields(msg: JointTrajectoryControllerState):
     """
@@ -88,6 +94,11 @@ class TrajFollowRecordActionServer(Node):
         self.declare_parameter("max_lag_s", 2.0)
         self.declare_parameter("phase_use_velocity", False)
 
+        # ===== FK/URDF 追加パラメータ =====
+        self.declare_parameter("urdf_path", "/home/common/3_SIP/tms_ws/src/traj_follow_measurement/traj_follow_plotter/urdf/zx200.urdf")
+        self.declare_parameter("fk_base_link", "base_link")
+        self.declare_parameter("fk_tip_link", "bucket_end_link")
+
         # ---- Action Server ----
         self._action_srv = ActionServer(
             self,
@@ -139,6 +150,86 @@ class TrajFollowRecordActionServer(Node):
 
         # matplotlibは最後だけ描画
         plt.ioff()
+
+        # ===== FK 状態追加 =====
+        self._fk_ready = False
+        self._fk_failed_reason = ""
+        self._kdl_chain = None
+        self._fk_solver = None
+        self._chain_joint_names: List[str] = []
+        self._joint_name_to_msg_index = {}
+
+        # 刃先（EE）ログ: 位置(x,y,z)
+        self.ee_ref = [[], [], []]
+        self.ee_fb  = [[], [], []]
+        self.ee_err = [[], [], []]
+
+        # 刃先（EE）ログ: 姿勢（RPY: roll,pitch,yaw）
+        self.ee_rpy_ref = [[], [], []]
+        self.ee_rpy_fb  = [[], [], []]
+        self.ee_rpy_err = [[], [], []]
+
+        # 刃先（EE）ログ: 姿勢（Quaternion: x,y,z,w）※CSV用にも残す
+        self.ee_quat_ref = [[], [], [], []]
+        self.ee_quat_fb  = [[], [], [], []]
+
+        # URDF 読み込み & FK チェーン準備（失敗しても計測自体は続行）
+        self._init_fk_from_urdf()
+
+    # ---------------------------
+    # FK init
+    # ---------------------------
+
+    def _init_fk_from_urdf(self):
+        urdf_path = str(self.get_parameter("urdf_path").value)
+        base_link = str(self.get_parameter("fk_base_link").value)
+        tip_link  = str(self.get_parameter("fk_tip_link").value)
+
+        if not urdf_path:
+            self._fk_failed_reason = "urdf_path is empty"
+            self.get_logger().warn("FK disabled: urdf_path is empty")
+            return
+
+        if not os.path.exists(urdf_path):
+            self._fk_failed_reason = f"urdf_path not found: {urdf_path}"
+            self.get_logger().warn(f"FK disabled: URDF not found: {urdf_path}")
+            return
+
+        try:
+            ok, tree = kdl_urdf.treeFromFile(urdf_path)
+            if not ok:
+                self._fk_failed_reason = "treeFromFile failed"
+                self.get_logger().warn("FK disabled: treeFromFile failed")
+                return
+
+            chain = tree.getChain(base_link, tip_link)
+            if chain.getNrOfSegments() == 0:
+                self._fk_failed_reason = f"KDL chain empty: {base_link} -> {tip_link}"
+                self.get_logger().warn(f"FK disabled: KDL chain empty: {base_link} -> {tip_link}")
+                return
+
+            self._kdl_chain = chain
+            self._fk_solver = PyKDL.ChainFkSolverPos_recursive(chain)
+
+            # チェーンに含まれる関節名（fixedは除外）
+            joint_names = []
+            for i in range(chain.getNrOfSegments()):
+                seg = chain.getSegment(i)
+                jnt = seg.getJoint()
+                name = jnt.getName()
+                # fixed joint は名前が空になることが多いので、それを除外
+                if name and name != "base_joint":
+                    joint_names.append(name)
+            self._chain_joint_names = joint_names
+
+            self._fk_ready = True
+            self.get_logger().info(
+                f"FK enabled: {base_link} -> {tip_link}, joints={len(self._chain_joint_names)}"
+            )
+        except Exception as e:
+            self._fk_ready = False
+            self._fk_failed_reason = str(e)
+            self.get_logger().warn("FK disabled with exception:\n" + traceback.format_exc())
 
     # ---------------------------
     # Action callbacks
@@ -271,6 +362,20 @@ class TrajFollowRecordActionServer(Node):
         self.err = []
         self.vel = []
 
+        # ===== FK buffers reset =====
+        self.ee_ref = [[], [], []]
+        self.ee_fb  = [[], [], []]
+        self.ee_err = [[], [], []]
+
+        self.ee_rpy_ref = [[], [], []]
+        self.ee_rpy_fb  = [[], [], []]
+        self.ee_rpy_err = [[], [], []]
+
+        self.ee_quat_ref = [[], [], [], []]
+        self.ee_quat_fb  = [[], [], [], []]
+
+        self._joint_name_to_msg_index = {}
+
     def _ensure_buffers(self, n_all: int):
         if self.n_all == n_all and self.ref:
             return
@@ -303,6 +408,12 @@ class TrajFollowRecordActionServer(Node):
         t_rel = now - (self.start_time or now)
         self.t.append(t_rel)
 
+        # dt_est を更新（録画中に推定精度を上げる）
+        if len(self.t) >= 2:
+            dt = self.t[-1] - self.t[-2]
+            if 1e-6 < dt < 1.0:
+                self.dt_est = 0.98 * self.dt_est + 0.02 * dt if self.dt_est > 0 else dt
+
         fb_pos = list(getattr(fb_pt, "positions", []))
         fb_vel = list(getattr(fb_pt, "velocities", []))  # empty ok
         ref_pos = list(getattr(ref_pt, "positions", []))
@@ -313,6 +424,89 @@ class TrajFollowRecordActionServer(Node):
             self.fb[j].append(fb_pos[j] if j < len(fb_pos) else math.nan)
             self.err[j].append(err_pos[j] if j < len(err_pos) else math.nan)
             self.vel[j].append(fb_vel[j] if j < len(fb_vel) else math.nan)
+
+        # ===== FK: joint_names マッピング（最初だけ）=====
+        if self._fk_ready and not self._joint_name_to_msg_index:
+            msg_joint_names = list(getattr(msg, "joint_names", []))
+            if not msg_joint_names:
+                self.get_logger().warn("FK disabled for this run: msg.joint_names is empty")
+                self._fk_ready = False
+            else:
+                m = {}
+                missing = []
+                for jn in self._chain_joint_names:
+                    if jn in msg_joint_names:
+                        m[jn] = msg_joint_names.index(jn)
+                    else:
+                        missing.append(jn)
+                if missing:
+                    self.get_logger().warn(
+                        "FK disabled for this run: chain joint(s) not in msg.joint_names: "
+                        + ", ".join(missing)
+                    )
+                    self._fk_ready = False
+                else:
+                    self._joint_name_to_msg_index = m
+                    self.get_logger().info("FK joint mapping is ready")
+
+        # ===== FK: bucket_end_link の位置/姿勢を保存 =====
+        if self._fk_ready and self._fk_solver is not None:
+            try:
+                nj = len(self._chain_joint_names)
+                q_ref = PyKDL.JntArray(nj)
+                q_fb  = PyKDL.JntArray(nj)
+
+                for k, jn in enumerate(self._chain_joint_names):
+                    idx = self._joint_name_to_msg_index[jn]
+                    q_ref[k] = ref_pos[idx] if idx < len(ref_pos) else float("nan")
+                    q_fb[k]  = fb_pos[idx]  if idx < len(fb_pos)  else float("nan")
+
+                fr_ref = PyKDL.Frame()
+                fr_fb  = PyKDL.Frame()
+
+                ret1 = self._fk_solver.JntToCart(q_ref, fr_ref)
+                ret2 = self._fk_solver.JntToCart(q_fb,  fr_fb)
+
+                if ret1 >= 0 and ret2 >= 0:
+                    # position
+                    xr, yr, zr = fr_ref.p[0], fr_ref.p[1], fr_ref.p[2]
+                    xf, yf, zf = fr_fb.p[0],  fr_fb.p[1],  fr_fb.p[2]
+
+                    self.ee_ref[0].append(xr); self.ee_ref[1].append(yr); self.ee_ref[2].append(zr)
+                    self.ee_fb[0].append(xf);  self.ee_fb[1].append(yf);  self.ee_fb[2].append(zf)
+                    self.ee_err[0].append(xr - xf); self.ee_err[1].append(yr - yf); self.ee_err[2].append(zr - zf)
+
+                    # RPY (roll,pitch,yaw)
+                    rr, pr, yr_ = fr_ref.M.GetRPY()
+                    rf, pf, yf_ = fr_fb.M.GetRPY()
+
+                    self.ee_rpy_ref[0].append(rr); self.ee_rpy_ref[1].append(pr); self.ee_rpy_ref[2].append(yr_)
+                    self.ee_rpy_fb[0].append(rf);  self.ee_rpy_fb[1].append(pf);  self.ee_rpy_fb[2].append(yf_)
+                    self.ee_rpy_err[0].append(rr - rf); self.ee_rpy_err[1].append(pr - pf); self.ee_rpy_err[2].append(yr_ - yf_)
+
+                    # Quaternion (x,y,z,w)
+                    qrx, qry, qrz, qrw = fr_ref.M.GetQuaternion()
+                    qfx, qfy, qfz, qfw = fr_fb.M.GetQuaternion()
+
+                    self.ee_quat_ref[0].append(qrx); self.ee_quat_ref[1].append(qry); self.ee_quat_ref[2].append(qrz); self.ee_quat_ref[3].append(qrw)
+                    self.ee_quat_fb[0].append(qfx);  self.ee_quat_fb[1].append(qfy);  self.ee_quat_fb[2].append(qfz);  self.ee_quat_fb[3].append(qfw)
+                else:
+                    for a in range(3):
+                        self.ee_ref[a].append(math.nan)
+                        self.ee_fb[a].append(math.nan)
+                        self.ee_err[a].append(math.nan)
+
+                        self.ee_rpy_ref[a].append(math.nan)
+                        self.ee_rpy_fb[a].append(math.nan)
+                        self.ee_rpy_err[a].append(math.nan)
+
+                    for a in range(4):
+                        self.ee_quat_ref[a].append(math.nan)
+                        self.ee_quat_fb[a].append(math.nan)
+
+            except Exception as e:
+                self.get_logger().warn(f"FK failed during run; disabling FK. reason={e}")
+                self._fk_ready = False
 
     # ---------------------------
     # Phase lag (optional)
@@ -373,9 +567,15 @@ class TrajFollowRecordActionServer(Node):
     # ---------------------------
 
     def make_final_plot(self):
-        rows = max(1, len(self.plot_joints))
+        n_joint_rows = max(1, len(self.plot_joints))
+
+        add_ee_pos = (len(self.ee_ref[0]) == len(self.t) and len(self.t) > 0)
+        add_ee_rpy = (len(self.ee_rpy_ref[0]) == len(self.t) and len(self.t) > 0)
+
+        rows = n_joint_rows + (3 if add_ee_pos else 0) + (3 if add_ee_rpy else 0)
         fig, axs = plt.subplots(rows, 2, sharex=True, squeeze=False, figsize=(11, 2.2 * rows))
 
+        # --- joints ---
         for r, j in enumerate(self.plot_joints):
             axp = axs[r][0]
             axe = axs[r][1]
@@ -399,6 +599,62 @@ class TrajFollowRecordActionServer(Node):
                 axp.legend(loc="upper right")
                 axe.legend(loc="upper right")
 
+        r0 = n_joint_rows
+
+        # --- end-effector position XYZ ---
+        if add_ee_pos:
+            labels = ["ee_x (m)", "ee_y (m)", "ee_z (m)"]
+            for i in range(3):
+                r = r0 + i
+                axp = axs[r][0]
+                axe = axs[r][1]
+
+                axp.plot(self.t, self.ee_ref[i], color="blue", linestyle="-", label="ee_reference")
+                axp.plot(self.t, self.ee_fb[i],  color="green", linestyle="--", label="ee_feedback")
+                axe.plot(self.t, self.ee_err[i], color="red", linestyle="-", label="ee_error")
+
+                lag = self.estimate_lag_samples(self.ee_ref[i], self.ee_fb[i], max_lag_s=self.max_lag_s)
+                ph_err = self.phase_shift_error(self.ee_ref[i], self.ee_fb[i], lag_samples=lag)
+                axe.plot(self.t, ph_err, color="purple", linestyle="--",
+                         label=f"ee_phase-error (lag={lag} samples)")
+
+                axp.set_ylabel(labels[i])
+                axe.set_ylabel(labels[i].replace("(m)", "err (m)"))
+                axp.grid(True)
+                axe.grid(True)
+
+                if r == 0:
+                    axp.legend(loc="upper right")
+                    axe.legend(loc="upper right")
+
+            r0 += 3
+
+        # --- end-effector orientation RPY ---
+        if add_ee_rpy:
+            labels = ["ee_roll (rad)", "ee_pitch (rad)", "ee_yaw (rad)"]
+            for i in range(3):
+                r = r0 + i
+                axp = axs[r][0]
+                axe = axs[r][1]
+
+                axp.plot(self.t, self.ee_rpy_ref[i], color="blue", linestyle="-", label="ee_rpy_reference")
+                axp.plot(self.t, self.ee_rpy_fb[i],  color="green", linestyle="--", label="ee_rpy_feedback")
+                axe.plot(self.t, self.ee_rpy_err[i], color="red", linestyle="-", label="ee_rpy_error")
+
+                lag = self.estimate_lag_samples(self.ee_rpy_ref[i], self.ee_rpy_fb[i], max_lag_s=self.max_lag_s)
+                ph_err = self.phase_shift_error(self.ee_rpy_ref[i], self.ee_rpy_fb[i], lag_samples=lag)
+                axe.plot(self.t, ph_err, color="purple", linestyle="--",
+                         label=f"ee_rpy_phase-error (lag={lag} samples)")
+
+                axp.set_ylabel(labels[i])
+                axe.set_ylabel(labels[i].replace("(rad)", "err (rad)"))
+                axp.grid(True)
+                axe.grid(True)
+
+                if r == 0:
+                    axp.legend(loc="upper right")
+                    axe.legend(loc="upper right")
+
         axs[-1][0].set_xlabel("time (s)")
         axs[-1][1].set_xlabel("time (s)")
 
@@ -408,10 +664,30 @@ class TrajFollowRecordActionServer(Node):
         return fig
 
     def save_csv(self, path: str):
+        add_ee_pos = (len(self.ee_ref[0]) == len(self.t) and len(self.t) > 0)
+        add_ee_rpy = (len(self.ee_rpy_ref[0]) == len(self.t) and len(self.t) > 0)
+        add_ee_quat = (len(self.ee_quat_ref[0]) == len(self.t) and len(self.t) > 0)
+
         with open(path, "w", encoding="utf-8") as f:
             header = ["t"]
             for j in self.plot_joints:
                 header += [f"j{j}_ref", f"j{j}_fb", f"j{j}_err", f"j{j}_vel"]
+
+            if add_ee_pos:
+                header += ["ee_ref_x", "ee_ref_y", "ee_ref_z",
+                           "ee_fb_x",  "ee_fb_y",  "ee_fb_z",
+                           "ee_err_x", "ee_err_y", "ee_err_z"]
+
+            if add_ee_rpy:
+                header += ["ee_rpy_ref_roll", "ee_rpy_ref_pitch", "ee_rpy_ref_yaw",
+                           "ee_rpy_fb_roll",  "ee_rpy_fb_pitch",  "ee_rpy_fb_yaw",
+                           "ee_rpy_err_roll", "ee_rpy_err_pitch", "ee_rpy_err_yaw"]
+
+            # Quaternion は “差” の扱いが難しいので（符号反転同値など）、ref/fb のみ保存
+            if add_ee_quat:
+                header += ["ee_quat_ref_x", "ee_quat_ref_y", "ee_quat_ref_z", "ee_quat_ref_w",
+                           "ee_quat_fb_x",  "ee_quat_fb_y",  "ee_quat_fb_z",  "ee_quat_fb_w"]
+
             f.write(",".join(header) + "\n")
 
             for i, t in enumerate(self.t):
@@ -421,6 +697,20 @@ class TrajFollowRecordActionServer(Node):
                     row.append(f"{self.fb[j][i]}")
                     row.append(f"{self.err[j][i]}")
                     row.append(f"{self.vel[j][i]}")
+                if add_ee_pos:
+                    row += [f"{self.ee_ref[0][i]}", f"{self.ee_ref[1][i]}", f"{self.ee_ref[2][i]}",
+                            f"{self.ee_fb[0][i]}",  f"{self.ee_fb[1][i]}",  f"{self.ee_fb[2][i]}",
+                            f"{self.ee_err[0][i]}", f"{self.ee_err[1][i]}", f"{self.ee_err[2][i]}"]
+
+                if add_ee_rpy:
+                    row += [f"{self.ee_rpy_ref[0][i]}", f"{self.ee_rpy_ref[1][i]}", f"{self.ee_rpy_ref[2][i]}",
+                            f"{self.ee_rpy_fb[0][i]}",  f"{self.ee_rpy_fb[1][i]}",  f"{self.ee_rpy_fb[2][i]}",
+                            f"{self.ee_rpy_err[0][i]}", f"{self.ee_rpy_err[1][i]}", f"{self.ee_rpy_err[2][i]}"]
+
+                if add_ee_quat:
+                    row += [f"{self.ee_quat_ref[0][i]}", f"{self.ee_quat_ref[1][i]}", f"{self.ee_quat_ref[2][i]}", f"{self.ee_quat_ref[3][i]}",
+                            f"{self.ee_quat_fb[0][i]}",  f"{self.ee_quat_fb[1][i]}",  f"{self.ee_quat_fb[2][i]}",  f"{self.ee_quat_fb[3][i]}"]
+
                 f.write(",".join(row) + "\n")
 
     def _finalize_and_save(self) -> Tuple[bool, str]:
@@ -438,16 +728,20 @@ class TrajFollowRecordActionServer(Node):
     # ---------------------------
 
     def _start_bag_record_all(self):
-        os.makedirs(self.bag_dir, exist_ok=True)
+        # os.makedirs(self.bag_dir, exist_ok=True)
 
         cmd = ["ros2", "bag", "record", "-a", "-o", self.bag_dir]
-
         self.get_logger().info("Starting bag: " + " ".join(cmd))
+
+        bag_log_path = os.path.join(self.out_dir, "bag_record.log")
+        self._bag_log = open(bag_log_path, "w", encoding="utf-8")
+
         self._bag_proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
+            stdout=self._bag_log,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,   # ★
         )
 
     def _stop_bag(self):
