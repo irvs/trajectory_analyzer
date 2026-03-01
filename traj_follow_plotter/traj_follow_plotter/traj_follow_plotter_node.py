@@ -624,10 +624,21 @@ class TrajFollowRecordActionServer(Node):
             axe.plot(self.t, ph_err, color="purple", linestyle="--",
                      label=f"phase-error (lag={lag} samples)")
 
-            axp.set_ylabel(f"j{j} pos")
-            axe.set_ylabel(f"j{j} err")
+            # 最大誤差を計算して表示
+            max_err = max_abs(self.err[j])
+            max_ph_err = max_abs(ph_err)
+            joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
+            
+            axp.set_ylabel(f"{joint_name} pos")
+            axe.set_ylabel(f"{joint_name} err")
             axp.grid(True)
             axe.grid(True)
+            
+            # 最大誤差をグラフ上部に表示
+            axe.text(0.02, 0.98, f"Max err: {max_err:.6f}\nMax phase-err: {max_ph_err:.6f}", 
+                     transform=axe.transAxes, verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+                     fontsize=8)
 
             if r == 0:
                 axp.legend(loc="upper right")
@@ -652,42 +663,62 @@ class TrajFollowRecordActionServer(Node):
                 axe.plot(self.t, ph_err, color="purple", linestyle="--",
                          label=f"ee_phase-error (lag={lag} samples)")
 
+                # 最大誤差を計算して表示
+                max_ee_err = max_abs(self.ee_err[i])
+                max_ee_ph_err = max_abs(ph_err)
+
                 axp.set_ylabel(labels[i])
                 axe.set_ylabel(labels[i].replace("(m)", "err (m)"))
                 axp.grid(True)
                 axe.grid(True)
+                
+                # 最大誤差をグラフ上部に表示
+                axe.text(0.02, 0.98, f"Max err: {max_ee_err:.6f} m\nMax phase-err: {max_ee_ph_err:.6f} m", 
+                         transform=axe.transAxes, verticalalignment='top',
+                         bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5),
+                         fontsize=8)
 
-                if r == 0:
+                if r == r0:  # 最初のEEプロットのみlegendを表示
                     axp.legend(loc="upper right")
                     axe.legend(loc="upper right")
 
             r0 += 3
 
         # --- end-effector orientation RPY ---
-        if add_ee_rpy:
-            labels = ["ee_roll (rad)", "ee_pitch (rad)", "ee_yaw (rad)"]
-            for i in range(3):
-                r = r0 + i
-                axp = axs[r][0]
-                axe = axs[r][1]
+        # if add_ee_rpy:
+        #     labels = ["ee_roll (rad)", "ee_pitch (rad)", "ee_yaw (rad)"]
+        #     for i in range(3):
+        #         r = r0 + i
+        #         axp = axs[r][0]
+        #         axe = axs[r][1]
 
-                axp.plot(self.t, self.ee_rpy_ref[i], color="blue", linestyle="-", label="ee_rpy_reference")
-                axp.plot(self.t, self.ee_rpy_fb[i],  color="green", linestyle="--", label="ee_rpy_feedback")
-                axe.plot(self.t, self.ee_rpy_err[i], color="red", linestyle="-", label="ee_rpy_error")
+        #         axp.plot(self.t, self.ee_rpy_ref[i], color="blue", linestyle="-", label="ee_rpy_reference")
+        #         axp.plot(self.t, self.ee_rpy_fb[i],  color="green", linestyle="--", label="ee_rpy_feedback")
+        #         axe.plot(self.t, self.ee_rpy_err[i], color="red", linestyle="-", label="ee_rpy_error")
 
-                lag = self.estimate_lag_samples(self.ee_rpy_ref[i], self.ee_rpy_fb[i], max_lag_s=self.max_lag_s)
-                ph_err = self.phase_shift_error(self.ee_rpy_ref[i], self.ee_rpy_fb[i], lag_samples=lag)
-                axe.plot(self.t, ph_err, color="purple", linestyle="--",
-                         label=f"ee_rpy_phase-error (lag={lag} samples)")
+        #         lag = self.estimate_lag_samples(self.ee_rpy_ref[i], self.ee_rpy_fb[i], max_lag_s=self.max_lag_s)
+        #         ph_err = self.phase_shift_error(self.ee_rpy_ref[i], self.ee_rpy_fb[i], lag_samples=lag)
+        #         axe.plot(self.t, ph_err, color="purple", linestyle="--",
+        #                  label=f"ee_rpy_phase-error (lag={lag} samples)")
 
-                axp.set_ylabel(labels[i])
-                axe.set_ylabel(labels[i].replace("(rad)", "err (rad)"))
-                axp.grid(True)
-                axe.grid(True)
+        #         # 最大誤差を計算して表示
+        #         max_rpy_err = max_abs(self.ee_rpy_err[i])
+        #         max_rpy_ph_err = max_abs(ph_err)
 
-                if r == 0:
-                    axp.legend(loc="upper right")
-                    axe.legend(loc="upper right")
+        #         axp.set_ylabel(labels[i])
+        #         axe.set_ylabel(labels[i].replace("(rad)", "err (rad)"))
+        #         axp.grid(True)
+        #         axe.grid(True)
+                
+        #         # 最大誤差をグラフ上部に表示
+        #         axe.text(0.02, 0.98, f"Max err: {max_rpy_err:.6f} rad\nMax phase-err: {max_rpy_ph_err:.6f} rad", 
+        #                  transform=axe.transAxes, verticalalignment='top',
+        #                  bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5),
+        #                  fontsize=8)
+
+        #         if r == r0:  # 最初のRPYプロットのみlegendを表示
+        #             axp.legend(loc="upper right")
+        #             axe.legend(loc="upper right")
 
         axs[-1][0].set_xlabel("time (s)")
         axs[-1][1].set_xlabel("time (s)")
