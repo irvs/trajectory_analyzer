@@ -404,9 +404,6 @@ class TrajFollowRecordActionServer(Node):
         self.ee_rpy_fb  = [[], [], []]
         self.ee_rpy_err = [[], [], []]
 
-        self.ee_quat_ref = [[], [], [], []]
-        self.ee_quat_fb  = [[], [], [], []]
-
         self._joint_name_to_msg_index = {}
 
     def _ensure_buffers(self, n_all: int):
@@ -467,11 +464,11 @@ class TrajFollowRecordActionServer(Node):
             else:
                 m = {}
                 missing = []
-                for jn in enumerate(self._chain_joint_names):
+                for jn in self._chain_joint_names:  # enumerate を削除
                     if jn in msg_joint_names:
                         m[jn] = msg_joint_names.index(jn)
                     else:
-                        missing.append(jn)
+                        missing.append(jn)  # これで文字列になる
                 if missing:
                     self.get_logger().warn(
                         "FK disabled for this run: chain joint(s) not in msg.joint_names: "
@@ -489,7 +486,7 @@ class TrajFollowRecordActionServer(Node):
                 q_ref = PyKDL.JntArray(nj)
                 q_fb  = PyKDL.JntArray(nj)
 
-                for k, jn in self._chain_joint_names:
+                for k, jn in enumerate(self._chain_joint_names):  # enumerate を追加
                     idx = self._joint_name_to_msg_index[jn]
                     q_ref[k] = ref_pos[idx] if idx < len(ref_pos) else float("nan")
                     q_fb[k]  = fb_pos[idx]  if idx < len(fb_pos)  else float("nan")

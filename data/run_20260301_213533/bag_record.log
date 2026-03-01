@@ -1,0 +1,37 @@
+[INFO] [1772368534.039019274] [rosbag2_recorder]: Press SPACE for pausing/resuming
+[INFO] [1772368534.040390741] [rosbag2_storage]: Opened database '/home/common/3_SIP/tms_ws/src/traj_follow_measurement/data/run_20260301_213533/bag/bag_0.db3' for READ_WRITE.
+[INFO] [1772368534.055067963] [rosbag2_recorder]: Listening for topics...
+[INFO] [1772368534.056410622] [rosbag2_recorder]: Subscribed to topic '/rosout'
+[INFO] [1772368534.056875295] [rosbag2_recorder]: Subscribed to topic '/events/write_split'
+[INFO] [1772368534.056952943] [rosbag2_recorder]: Recording...
+[INFO] [1772368534.057207589] [rosbag2_recorder]: Event publisher thread: Starting
+[WARN] [1772368534.162013834] [ROSBAG2_TRANSPORT]: Hidden topics are not recorded. Enable them with --include-hidden-topics
+[INFO] [1772368534.170072095] [rosbag2_recorder]: Subscribed to topic '/zx200/trajectory_execution_event'
+[INFO] [1772368534.172556567] [rosbag2_recorder]: Subscribed to topic '/zx200/upper_arm_controller/transition_event'
+[INFO] [1772368534.174064023] [rosbag2_recorder]: Subscribed to topic '/zx200/robot_description_semantic'
+[INFO] [1772368534.175531075] [rosbag2_recorder]: Subscribed to topic '/zx200/robot_description'
+[INFO] [1772368534.177750108] [rosbag2_recorder]: Subscribed to topic '/zx200/display_contacts'
+[INFO] [1772368534.180112544] [rosbag2_recorder]: Subscribed to topic '/zx200/upper_arm_controller/controller_state'
+[INFO] [1772368534.181540652] [rosbag2_recorder]: Subscribed to topic '/zx200/rviz_moveit_motion_planning_display/robot_interaction_interactive_marker_topic/feedback'
+[INFO] [1772368534.183971664] [rosbag2_recorder]: Subscribed to topic '/zx200/monitored_planning_scene'
+[INFO] [1772368534.185867451] [rosbag2_recorder]: Subscribed to topic '/zx200/planning_scene'
+[INFO] [1772368534.187552094] [rosbag2_recorder]: Subscribed to topic '/zx200/joint_states'
+[INFO] [1772368534.190127635] [rosbag2_recorder]: Subscribed to topic '/zx200/rviz_moveit_motion_planning_display/robot_interaction_interactive_marker_topic/update'
+[INFO] [1772368534.191506908] [rosbag2_recorder]: Subscribed to topic '/zx200/front_cmd'
+[INFO] [1772368534.193317201] [rosbag2_recorder]: Subscribed to topic '/zx200/dynamic_joint_states'
+[INFO] [1772368534.197176209] [rosbag2_recorder]: Subscribed to topic '/zx200/motion_plan_request'
+[INFO] [1772368534.200913809] [rosbag2_recorder]: Subscribed to topic '/zx200/upper_arm_controller/state'
+[INFO] [1772368534.202753402] [rosbag2_recorder]: Subscribed to topic '/emergency_signal'
+[INFO] [1772368534.203910598] [rosbag2_recorder]: Subscribed to topic '/zx200/attached_collision_object'
+[INFO] [1772368534.206083332] [rosbag2_recorder]: Subscribed to topic '/c30r/odom'
+[INFO] [1772368534.207882682] [rosbag2_recorder]: Subscribed to topic '/zx200/planning_scene_world'
+[INFO] [1772368534.209002594] [rosbag2_recorder]: Subscribed to topic '/zx200/base_link/pose'
+[INFO] [1772368534.210215417] [rosbag2_recorder]: Subscribed to topic '/tf_static'
+[INFO] [1772368534.212075109] [rosbag2_recorder]: Subscribed to topic '/task_sequence'
+[INFO] [1772368534.214356306] [rosbag2_recorder]: Subscribed to topic '/zx200/display_planned_path'
+[INFO] [1772368534.225850374] [rosbag2_recorder]: Subscribed to topic '/parameter_events'
+[INFO] [1772368534.227844331] [rosbag2_recorder]: Subscribed to topic '/zx200/odom'
+[INFO] [1772368534.230284031] [rosbag2_recorder]: Subscribed to topic '/tf'
+[INFO] [1772368534.232585574] [rosbag2_recorder]: Subscribed to topic '/clock'
+[INFO] [1772368534.234541482] [rosbag2_recorder]: Subscribed to topic '/zx200/joint_state_broadcaster/transition_event'
+[INFO] [1772368534.237181589] [rosbag2_recorder]: Subscribed to topic '/c30r/base_link/pose'

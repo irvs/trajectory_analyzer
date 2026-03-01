@@ -48,37 +48,57 @@ def generate_nodes(context, *args, **kwargs):
             )
         )
     
-    # 2. robot_state_publisher (Reference用)
+    # 2. Static TF: world → ref/base_link と world → fb/base_link
+    # 両方のロボットを同じ位置に配置（重ねて表示）
+    static_tf_ref = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_ref',
+        arguments=['0', '0', '0', '0', '0', '0', 'world', 'ref/base_link'],
+        output='screen'
+    )
+    nodes.append(static_tf_ref)
+    
+    static_tf_fb = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_fb',
+        arguments=['0', '0', '0', '0', '0', '0', 'world', 'fb/base_link'],
+        output='screen'
+    )
+    nodes.append(static_tf_fb)
+    
+    # 3. robot_state_publisher (Reference用) - xacroにprefix引数を渡す
     robot_state_publisher_ref = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
-        name='robot_state_publisher_ref',
+        name='robot_state_publisher',
         namespace='ref',
         output='screen',
         parameters=[{
-            'robot_description': Command(['xacro ', urdf_file.perform(context)]),
+            'robot_description': Command(['xacro ', urdf_file.perform(context), ' prefix:=ref/']),
         }],
-        remappings=[('/ref/joint_states', '/video_gen/joint_states_ref')],
+        remappings=[('joint_states', '/video_gen/joint_states_ref')],
         additional_env={'DISPLAY': display}
     )
     nodes.append(robot_state_publisher_ref)
     
-    # 3. robot_state_publisher (Feedback用)
+    # 4. robot_state_publisher (Feedback用) - xacroにprefix引数を渡す
     robot_state_publisher_fb = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
-        name='robot_state_publisher_fb',
+        name='robot_state_publisher',
         namespace='fb',
         output='screen',
         parameters=[{
-            'robot_description': Command(['xacro ', urdf_file.perform(context)]),
+            'robot_description': Command(['xacro ', urdf_file.perform(context), ' prefix:=fb/']),
         }],
-        remappings=[('/fb/joint_states', '/video_gen/joint_states_fb')],
+        remappings=[('joint_states', '/video_gen/joint_states_fb')],
         additional_env={'DISPLAY': display}
     )
     nodes.append(robot_state_publisher_fb)
     
-    # 4. video_player
+    # 5. video_player
     video_player = Node(
         package='traj_follow_plotter',
         executable='video_player',
@@ -98,7 +118,7 @@ def generate_nodes(context, *args, **kwargs):
     )
     nodes.append(video_player_delayed)
     
-    # 5. RViz（3秒後に起動）
+    # 6. RViz（3秒後に起動）
     rviz = TimerAction(
         period=3.0,
         actions=[
@@ -118,7 +138,7 @@ def generate_nodes(context, *args, **kwargs):
     )
     nodes.append(rviz)
     
-    # 6. ffmpeg（3秒後に録画開始、use_xvfb=trueの場合のみ）
+    # 7. ffmpeg（3秒後に録画開始、use_xvfb=trueの場合のみ）
     if use_xvfb.lower() == 'true':
         ffmpeg = TimerAction(
             period=3.0,
@@ -143,7 +163,7 @@ def generate_nodes(context, *args, **kwargs):
         )
         nodes.append(ffmpeg)
     
-    # 7. video_playerが終了したら3秒待ってシャットダウン（use_xvfb=trueの場合のみ）
+    # 8. video_playerが終了したら3秒待ってシャットダウン（use_xvfb=trueの場合のみ）
     if use_xvfb.lower() == 'true':
         shutdown_handler = RegisterEventHandler(
             OnProcessExit(

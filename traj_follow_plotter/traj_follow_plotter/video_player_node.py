@@ -7,6 +7,10 @@ import csv
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
+import tf2_ros
+from tf2_ros import TransformException
 
 
 class VideoPlayerNode(Node):
@@ -30,7 +34,7 @@ class VideoPlayerNode(Node):
             self.get_logger().error(f"CSV file not found: {csv_path}")
             raise FileNotFoundError(csv_path)
         
-        # URDFの関節名
+        # URDFの関節名（ベース名）
         self.joint_names = [
             "swing_joint",
             "boom_joint", 
@@ -39,9 +43,27 @@ class VideoPlayerNode(Node):
             "bucket_end_joint"
         ]
         
+        # プレフィックス付きの関節名
+        self.joint_names_ref = [f"ref/{name}" for name in self.joint_names]
+        self.joint_names_fb = [f"fb/{name}" for name in self.joint_names]
+        
         # Publishers（絶対パスで指定）
         self.pub_ref = self.create_publisher(JointState, "/video_gen/joint_states_ref", 10)
         self.pub_fb = self.create_publisher(JointState, "/video_gen/joint_states_fb", 10)
+        
+        # 軌跡パブリッシャー
+        self.pub_path_ref = self.create_publisher(Path, "/video_gen/path_ref", 10)
+        self.pub_path_fb = self.create_publisher(Path, "/video_gen/path_fb", 10)
+        
+        # 軌跡データ（刃先の位置履歴）
+        self.path_ref = Path()
+        self.path_ref.header.frame_id = "ref/base_link"
+        self.path_fb = Path()
+        self.path_fb.header.frame_id = "fb/base_link"
+        
+        # TFリスナー
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
         # データ読み込み
         self.data = self._load_csv(csv_path)
@@ -76,7 +98,10 @@ class VideoPlayerNode(Node):
         if self.frame_idx >= len(self.data):
             if self.loop:
                 self.frame_idx = 0
-                self.get_logger().info("Looping playback...")
+                # ループ時にPathをリセット
+                self.path_ref.poses.clear()
+                self.path_fb.poses.clear()
+                self.get_logger().info("Looping playback... (Path reset)")
             else:
                 self.get_logger().info("Playback finished")
                 self.timer.cancel()
@@ -94,13 +119,13 @@ class VideoPlayerNode(Node):
         msg_ref = JointState()
         msg_ref.header.stamp = self.get_clock().now().to_msg()
         msg_ref.header.frame_id = ""
-        msg_ref.name = self.joint_names
+        msg_ref.name = self.joint_names_ref
         msg_ref.position = []
         
         msg_fb = JointState()
         msg_fb.header.stamp = self.get_clock().now().to_msg()
         msg_fb.header.frame_id = ""
-        msg_fb.name = self.joint_names
+        msg_fb.name = self.joint_names_fb
         msg_fb.position = []
         
         # CSVから値を読み取る
@@ -116,7 +141,81 @@ class VideoPlayerNode(Node):
         self.pub_ref.publish(msg_ref)
         self.pub_fb.publish(msg_fb)
         
+        # 刃先の位置を取得して軌跡に追加（少し待ってからTF取得）
+        # one_shotがないので、コールバック内でキャンセルする方式
+        def delayed_update():
+            self._update_trajectory()
+            # このタイマーは一度だけ実行されるようにキャンセル
+            if hasattr(self, '_trajectory_timer') and self._trajectory_timer is not None:
+                self._trajectory_timer.cancel()
+        
+        if hasattr(self, '_trajectory_timer') and self._trajectory_timer is not None:
+            self._trajectory_timer.cancel()
+        self._trajectory_timer = self.create_timer(0.01, delayed_update)
+        
         self.frame_idx += 1
+    
+    def _update_trajectory(self):
+        """刃先のTFを取得して軌跡を更新"""
+        try:
+            # まずは名前空間なしで試す（robot_state_publisherの動作による）
+            try:
+                trans_ref = self.tf_buffer.lookup_transform(
+                    'base_link',
+                    'bucket_end_link',
+                    rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.05)
+                )
+                trans_fb = self.tf_buffer.lookup_transform(
+                    'base_link',
+                    'bucket_end_link',
+                    rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.05)
+                )
+            except TransformException:
+                # 名前空間付きで試す
+                trans_ref = self.tf_buffer.lookup_transform(
+                    'ref/base_link',
+                    'ref/bucket_end_link',
+                    rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.05)
+                )
+                trans_fb = self.tf_buffer.lookup_transform(
+                    'fb/base_link',
+                    'fb/bucket_end_link',
+                    rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.05)
+                )
+            
+            pose_ref = PoseStamped()
+            pose_ref.header.stamp = self.get_clock().now().to_msg()
+            pose_ref.header.frame_id = "ref/base_link"
+            pose_ref.pose.position.x = trans_ref.transform.translation.x
+            pose_ref.pose.position.y = trans_ref.transform.translation.y
+            pose_ref.pose.position.z = trans_ref.transform.translation.z
+            pose_ref.pose.orientation = trans_ref.transform.rotation
+            
+            self.path_ref.poses.append(pose_ref)
+            self.path_ref.header.stamp = self.get_clock().now().to_msg()
+            
+            pose_fb = PoseStamped()
+            pose_fb.header.stamp = self.get_clock().now().to_msg()
+            pose_fb.header.frame_id = "fb/base_link"
+            pose_fb.pose.position.x = trans_fb.transform.translation.x
+            pose_fb.pose.position.y = trans_fb.transform.translation.y
+            pose_fb.pose.position.z = trans_fb.transform.translation.z
+            pose_fb.pose.orientation = trans_fb.transform.rotation
+            
+            self.path_fb.poses.append(pose_fb)
+            self.path_fb.header.stamp = self.get_clock().now().to_msg()
+            
+            # 軌跡を配信
+            self.pub_path_ref.publish(self.path_ref)
+            self.pub_path_fb.publish(self.path_fb)
+            
+        except TransformException as ex:
+            # 初回はTFがまだ準備できていない可能性があるので無視
+            pass
     
     def _start_playback(self):
         """遅延後に再生を開始"""
