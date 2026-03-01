@@ -4,6 +4,8 @@ import math
 import signal
 import subprocess
 import datetime
+import time
+import tempfile
 from typing import Optional, List, Tuple
 from collections import OrderedDict
 
@@ -14,6 +16,7 @@ from rclpy.node import Node
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 
 from control_msgs.msg import JointTrajectoryControllerState
+from sensor_msgs.msg import JointState
 
 # planの保存用（YAML化）
 from rosidl_runtime_py.convert import message_to_ordereddict
@@ -62,6 +65,27 @@ def max_abs(xs: List[float]) -> float:
             m = av
     return m
 
+def quat_to_rpy(x: float, y: float, z: float, w: float) -> Tuple[float, float, float]:
+    # ZYX (roll-pitch-yaw) 変換
+    # roll (x-axis rotation)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+
+    # pitch (y-axis rotation)
+    sinp = 2.0 * (w * y - z * x)
+    if abs(sinp) >= 1.0:
+        pitch = math.copysign(math.pi / 2.0, sinp)
+    else:
+        pitch = math.asin(sinp)
+
+    # yaw (z-axis rotation)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+
+    return roll, pitch, yaw
+
 
 class TrajFollowRecordActionServer(Node):
     """
@@ -80,6 +104,15 @@ class TrajFollowRecordActionServer(Node):
 
     def __init__(self):
         super().__init__("traj_follow_record_action_server")
+
+        # URDFの実際の関節名を定義（zx200用）
+        self.urdf_joint_names = [
+            "swing_joint",
+            "boom_joint",
+            "arm_joint",
+            "bucket_joint",
+            "bucket_end_joint"
+        ]
 
         self.t: List[float] = []
         self.ref: List[List[float]] = []
@@ -434,7 +467,7 @@ class TrajFollowRecordActionServer(Node):
             else:
                 m = {}
                 missing = []
-                for jn in self._chain_joint_names:
+                for jn in enumerate(self._chain_joint_names):
                     if jn in msg_joint_names:
                         m[jn] = msg_joint_names.index(jn)
                     else:
@@ -456,7 +489,7 @@ class TrajFollowRecordActionServer(Node):
                 q_ref = PyKDL.JntArray(nj)
                 q_fb  = PyKDL.JntArray(nj)
 
-                for k, jn in enumerate(self._chain_joint_names):
+                for k, jn in self._chain_joint_names:
                     idx = self._joint_name_to_msg_index[jn]
                     q_ref[k] = ref_pos[idx] if idx < len(ref_pos) else float("nan")
                     q_fb[k]  = fb_pos[idx]  if idx < len(fb_pos)  else float("nan")
@@ -476,9 +509,13 @@ class TrajFollowRecordActionServer(Node):
                     self.ee_fb[0].append(xf);  self.ee_fb[1].append(yf);  self.ee_fb[2].append(zf)
                     self.ee_err[0].append(xr - xf); self.ee_err[1].append(yr - yf); self.ee_err[2].append(zr - zf)
 
-                    # RPY (roll,pitch,yaw)
-                    rr, pr, yr_ = fr_ref.M.GetRPY()
-                    rf, pf, yf_ = fr_fb.M.GetRPY()
+                    # Quaternion (x,y,z,w)
+                    qrx, qry, qrz, qrw = fr_ref.M.GetQuaternion()
+                    qfx, qfy, qfz, qfw = fr_fb.M.GetQuaternion()
+
+                    # RPY (roll,pitch,yaw) を Quaternion から計算（PyKDLのGetRPYの環境差回避）
+                    rr, pr, yr_ = quat_to_rpy(qrx, qry, qrz, qrw)
+                    rf, pf, yf_ = quat_to_rpy(qfx, qfy, qfz, qfw)
 
                     self.ee_rpy_ref[0].append(rr); self.ee_rpy_ref[1].append(pr); self.ee_rpy_ref[2].append(yr_)
                     self.ee_rpy_fb[0].append(rf);  self.ee_rpy_fb[1].append(pf);  self.ee_rpy_fb[2].append(yf_)
@@ -505,7 +542,7 @@ class TrajFollowRecordActionServer(Node):
                         self.ee_quat_fb[a].append(math.nan)
 
             except Exception as e:
-                self.get_logger().warn(f"FK failed during run; disabling FK. reason={e}")
+                self.get_logger().warn("FK failed during run; disabling FK.\n" + traceback.format_exc())
                 self._fk_ready = False
 
     # ---------------------------
@@ -670,8 +707,11 @@ class TrajFollowRecordActionServer(Node):
 
         with open(path, "w", encoding="utf-8") as f:
             header = ["t"]
+            
+            # URDFの実際の関節名を使用（j0, j1...の代わりに）
             for j in self.plot_joints:
-                header += [f"j{j}_ref", f"j{j}_fb", f"j{j}_err", f"j{j}_vel"]
+                joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
+                header += [f"{joint_name}_ref", f"{joint_name}_fb", f"{joint_name}_err", f"{joint_name}_vel"]
 
             if add_ee_pos:
                 header += ["ee_ref_x", "ee_ref_y", "ee_ref_z",
@@ -683,7 +723,7 @@ class TrajFollowRecordActionServer(Node):
                            "ee_rpy_fb_roll",  "ee_rpy_fb_pitch",  "ee_rpy_fb_yaw",
                            "ee_rpy_err_roll", "ee_rpy_err_pitch", "ee_rpy_err_yaw"]
 
-            # Quaternion は “差” の扱いが難しいので（符号反転同値など）、ref/fb のみ保存
+            # Quaternion は "差" の扱いが難しいので（符号反転同値など）、ref/fb のみ保存
             if add_ee_quat:
                 header += ["ee_quat_ref_x", "ee_quat_ref_y", "ee_quat_ref_z", "ee_quat_ref_w",
                            "ee_quat_fb_x",  "ee_quat_fb_y",  "ee_quat_fb_z",  "ee_quat_fb_w"]

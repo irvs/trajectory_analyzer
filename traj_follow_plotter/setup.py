@@ -1,4 +1,6 @@
 from setuptools import setup
+import os
+from glob import glob
 
 package_name = 'traj_follow_plotter'
 
@@ -9,6 +11,11 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.rviz')),
+        (os.path.join('share', package_name, 'meshes'), glob('meshes/*.dae')),
+        (os.path.join('share', package_name, 'meshes'), glob('meshes/*.xacro')),
+        (os.path.join('share', package_name, 'meshes'), glob('meshes/*.png')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -20,6 +27,8 @@ setup(
     entry_points={
         'console_scripts': [
             'plot = traj_follow_plotter.traj_follow_plotter_node:main',
+            'video_player = traj_follow_plotter.video_player_node:main',
+            'generate_rviz_config = traj_follow_plotter.generate_rviz_config:main',
         ],
     },
 )

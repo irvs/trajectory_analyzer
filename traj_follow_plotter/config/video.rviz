@@ -1,0 +1,45 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+
+Visualization Manager:
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Plane: XY
+    - Alpha: 0.6
+      Class: rviz_default_plugins/RobotModel
+      Name: Reference
+      Description Topic:
+        Value: /ref/robot_description
+      Enabled: true
+      Visual Enabled: true
+    - Alpha: 1.0
+      Class: rviz_default_plugins/RobotModel
+      Name: Feedback
+      Description Topic:
+        Value: /fb/robot_description
+      Enabled: true
+      Visual Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: base_link
+    Frame Rate: 30
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 15
+      Focal Point:
+        X: 3
+        Y: 0
+        Z: 2
+      Pitch: 0.4
+      Yaw: 0.785
+Window Geometry:
+  Height: 1016
+  Width: 1920

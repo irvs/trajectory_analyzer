@@ -1,0 +1,167 @@
+<?xml version="1.0"?>
+<robot name="zx200" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<!-- Used for fixing robot to Gazebo 'base_link' -->
+<link name="base_link"/>
+
+<joint name="base_joint" type="fixed">
+<parent link="base_link"/>
+<child link="track_link"/>
+</joint>
+
+<!-- Base Link -->
+<link name="track_link">
+<visual>
+<geometry>
+<mesh filename="package://traj_follow_plotter/meshes/zx200-crawler.dae"/>
+</geometry>
+</visual>
+<collision>
+<geometry>
+<mesh filename="package://traj_follow_plotter/meshes/zx200-crawler.dae"/>
+</geometry>
+</collision>
+<inertial>
+<origin xyz="0 0 0" rpy="0 0 0"/>
+<mass value="0.03"/>
+<inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0"/>
+</inertial>
+</link>
+
+<!-- body axis -->
+<joint name="swing_joint" type="continuous">
+<origin xyz="0.10787 -0.034301 1.1206"/>
+<axis xyz="0 0 1"/>
+<parent link="track_link"/>
+<child link="body_link"/>
+</joint>
+
+<link name="body_link">
+<visual>
+<origin xyz="0 0 0"/>
+<geometry>
+<mesh filename="package://traj_follow_plotter/meshes/zx200-body.dae"/>
+</geometry>
+</visual>
+<collision>
+<origin xyz="0 0 0"/>
+<geometry>
+<mesh filename="package://traj_follow_plotter/meshes/zx200-body.dae"/>
+</geometry>
+</collision>
+<inertial>
+<origin xyz="0 0 0" rpy="0 0 0"/>
+<mass value="0.03"/>
+<inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0"/>
+</inertial>
+</link>
+
+<!-- boom axis -->
+<joint name="boom_joint" type="revolute">
+<origin rpy="0 0.559505 0" xyz="0.22767 -0.040187 0.83669"/>
+<axis xyz="0 1 0"/>
+<parent link="body_link"/>
+<child link="boom_link"/>
+<limit lower="-1.137" upper="-0.1" effort="500" velocity="6.159937255"/>
+</joint>
+
+<link name="boom_link">
+<visual>
+<origin xyz="0 0 0"/>
+<geometry>
+<mesh filename="package://traj_follow_plotter/meshes/zx200-boom.dae"/>
+</geometry>
+</visual>
+<collision>
+<origin xyz="0 0 0"/>
+<geometry>
+<mesh filename="package://traj_follow_plotter/meshes/zx200-boom.dae"/>
+</geometry>
+</collision>
+<inertial>
+<origin xyz="0 0 0" rpy="0 0 0"/>
+<mass value="0.03"/>
+<inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0"/>
+</inertial>
+</link>
+
+<joint name="arm_joint" type="revolute">
+<origin rpy="0 0.296258 0" xyz="4.7878 0.010957 2.9959"/>
+<axis xyz="0 1 0"/>
+<parent link="boom_link"/>
+<child link="arm_link"/>
+<limit lower="0.594" upper="2.531" effort="500" velocity="6.159937255"/>
+</joint>
+
+<link name="arm_link">
+<visual>
+<origin xyz="0 0 0"/>
+<geometry>
+<mesh filename="package://traj_follow_plotter/meshes/zx200-arm.dae"/>
+</geometry>
+</visual>
+<collision>
+<origin xyz="0 0 0"/>
+<geometry>
+<mesh filename="package://traj_follow_plotter/meshes/zx200-arm.dae"/>
+</geometry>
+</collision>
+<inertial>
+<origin xyz="0 0 0" rpy="0 0 0"/>
+<mass value="0.03"/>
+<inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0"/>
+</inertial>
+</link>
+
+<!-- bucket axis -->
+<joint name="bucket_joint" type="revolute">
+<origin rpy="0 -0.160621 0" xyz="1.8954 -0.023546 2.1809"/>
+<axis xyz="0 1 0"/>
+<parent link="arm_link"/>
+<child link="bucket_link"/>
+<limit lower="-0.622" upper="2.372" effort="50000" velocity="6.159937255"/>
+</joint>
+
+<link name="bucket_link">
+<visual>
+<origin xyz="0 0 0"/>
+<geometry>
+<mesh filename="package://traj_follow_plotter/meshes/zx200-bucket.dae"/>
+</geometry>
+</visual>
+<collision>
+<origin xyz="0 0 0"/>
+<geometry>
+<mesh filename="package://traj_follow_plotter/meshes/zx200-bucket.dae"/>
+</geometry>
+</collision>
+<inertial>
+<origin xyz="0 0 0" rpy="0 0 0"/>
+<mass value="0.03"/>
+<inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0"/>
+</inertial>
+</link>
+
+<link name="bucket_end_link">
+<visual>
+<origin xyz="0 0 0" rpy="0 0 0"/>
+<geometry>
+<box size="0.001 0.001 0.001" />
+</geometry>
+</visual>
+<inertial>
+<origin xyz="0 0 0" />
+<mass value="1.0e-03" />
+<inertia ixx="1.0e-03" ixy="0.0" ixz="0.0" iyy="1.0e-03" iyz="0.0" izz="1.0e-03" />
+</inertial>
+</link>
+
+<joint name="bucket_end_joint" type="revolute">
+<parent link="bucket_link"/>
+<child link="bucket_end_link"/>
+<axis xyz="1 0 0"/>
+<origin rpy="0 0 0" xyz="1.2 0 1"/>
+<limit effort="1" lower="-3.14" upper="3.14" velocity="0.5"/>
+</joint>
+
+</robot>
