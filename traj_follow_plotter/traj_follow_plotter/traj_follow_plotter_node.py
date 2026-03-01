@@ -124,7 +124,7 @@ class TrajFollowRecordActionServer(Node):
         self.declare_parameter("output_root", "/home/common/3_SIP/tms_ws/src/traj_follow_measurement/data")
         self.declare_parameter("record_bag_all", True)     # -a 相当をデフォルトで回すか
 
-        self.declare_parameter("max_lag_s", 2.0)
+        self.declare_parameter("max_lag_s", 5.0)
         self.declare_parameter("phase_use_velocity", False)
 
         # ===== FK/URDF 追加パラメータ =====
@@ -206,8 +206,15 @@ class TrajFollowRecordActionServer(Node):
         self.ee_quat_ref = [[], [], [], []]
         self.ee_quat_fb  = [[], [], [], []]
 
+        # 刃先（EE）ログ: 3D距離誤差
+        self.ee_dist_err = []  # sqrt(ex^2 + ey^2 + ez^2)
+
         # URDF 読み込み & FK チェーン準備（失敗しても計測自体は続行）
         self._init_fk_from_urdf()
+
+        # ===== plan trajectory buffers =====
+        self.plan_t = []
+        self.plan_pos = []
 
     # ---------------------------
     # FK init
@@ -284,11 +291,12 @@ class TrajFollowRecordActionServer(Node):
         # 出力ディレクトリ作成（同一Goal内の成果物を全部ここへ）
         self._prepare_output_dir()
 
-        # plan（Goal内容）を即保存
+        # state購読開始前にバッファリセット
+        self._reset_buffers()
+
+        # plan（Goal内容）を即保存 ← _reset_buffers()の後に移動
         self._save_plan_yaml(goal_handle.request)
 
-        # state購読開始
-        self._reset_buffers()
         self.topic = str(self.get_parameter("state_topic").value)
         self._sub = self.create_subscription(
             JointTrajectoryControllerState,
@@ -379,6 +387,42 @@ class TrajFollowRecordActionServer(Node):
         with open(self.out_plan, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
         self.get_logger().info(f"Saved plan: {self.out_plan}")
+        
+        # ===== planから軌道データを抽出 =====
+        self._extract_plan_trajectory(goal_msg.plan)
+
+    def _extract_plan_trajectory(self, plan_trajectories):
+        """planからtime_from_startと関節位置を抽出"""
+        self.plan_t = []
+        self.plan_pos = []
+        
+        try:
+            for robot_traj in plan_trajectories:
+                # RobotTrajectory内のjoint_trajectoryを取得
+                joint_traj = robot_traj.joint_trajectory
+                
+                # joint_namesを取得（関節の順序を把握）
+                joint_names = list(joint_traj.joint_names)
+                
+                # 各pointから時刻と位置を抽出
+                for point in joint_traj.points:
+                    # time_from_startをfloat秒に変換
+                    t_sec = point.time_from_start.sec + point.time_from_start.nanosec * 1e-9
+                    self.plan_t.append(t_sec)
+                    
+                    # 位置データを保存（全関節分）
+                    positions = list(point.positions)
+                    self.plan_pos.append(positions)
+            
+            if self.plan_t:
+                self.get_logger().info(f"Extracted plan trajectory: {len(self.plan_t)} points")
+            else:
+                self.get_logger().warn("No trajectory points found in plan")
+                
+        except Exception as e:
+            self.get_logger().warn(f"Failed to extract plan trajectory: {e}\n{traceback.format_exc()}")
+            self.plan_t = []
+            self.plan_pos = []
 
     # ---------------------------
     # Recording buffers
@@ -405,6 +449,10 @@ class TrajFollowRecordActionServer(Node):
         self.ee_rpy_err = [[], [], []]
 
         self._joint_name_to_msg_index = {}
+        
+        # ===== plan trajectory buffers =====
+        self.plan_t = []
+        self.plan_pos = []
 
     def _ensure_buffers(self, n_all: int):
         if self.n_all == n_all and self.ref:
@@ -506,6 +554,10 @@ class TrajFollowRecordActionServer(Node):
                     self.ee_fb[0].append(xf);  self.ee_fb[1].append(yf);  self.ee_fb[2].append(zf)
                     self.ee_err[0].append(xr - xf); self.ee_err[1].append(yr - yf); self.ee_err[2].append(zr - zf)
 
+                    # 3D距離誤差
+                    dist_err = math.sqrt((xr - xf)**2 + (yr - yf)**2 + (zr - zf)**2)
+                    self.ee_dist_err.append(dist_err)
+
                     # Quaternion (x,y,z,w)
                     qrx, qry, qrz, qrw = fr_ref.M.GetQuaternion()
                     qfx, qfy, qfz, qfw = fr_fb.M.GetQuaternion()
@@ -538,6 +590,8 @@ class TrajFollowRecordActionServer(Node):
                         self.ee_quat_ref[a].append(math.nan)
                         self.ee_quat_fb[a].append(math.nan)
 
+                    self.ee_dist_err.append(math.nan)
+
             except Exception as e:
                 self.get_logger().warn("FK failed during run; disabling FK.\n" + traceback.format_exc())
                 self._fk_ready = False
@@ -556,6 +610,7 @@ class TrajFollowRecordActionServer(Node):
 
         ref_arr, fb_arr = self._finite_pair(ref_arr, fb_arr)
         if len(ref_arr) < 20:
+            self.get_logger().info(f"estimate_lag_samples: insufficient data ({len(ref_arr)} < 20)")
             return 0
 
         if self.phase_use_velocity:
@@ -563,6 +618,7 @@ class TrajFollowRecordActionServer(Node):
             fb_arr  = np.diff(fb_arr)
 
         if len(ref_arr) < 20:
+            self.get_logger().info(f"estimate_lag_samples: insufficient data after diff ({len(ref_arr)} < 20)")
             return 0
 
         ref_arr = ref_arr - np.mean(ref_arr)
@@ -570,6 +626,7 @@ class TrajFollowRecordActionServer(Node):
 
         max_lag = int(max(0.0, max_lag_s) / self.dt_est)
         if max_lag <= 0:
+            self.get_logger().warn(f"estimate_lag_samples: max_lag={max_lag} (max_lag_s={max_lag_s}, dt_est={self.dt_est})")
             return 0
 
         corr = np.correlate(ref_arr, fb_arr, mode="full")
@@ -579,12 +636,15 @@ class TrajFollowRecordActionServer(Node):
         corr = corr[m]
         lags = lags[m]
         if len(corr) == 0:
+            self.get_logger().warn(f"estimate_lag_samples: no correlation data after filtering (max_lag={max_lag})")
             return 0
 
         best_lag = int(lags[np.argmax(corr)])
         lag_samples = -best_lag
         if lag_samples < 0:
             lag_samples = 0
+        
+        self.get_logger().info(f"estimate_lag_samples: detected lag={lag_samples} samples ({lag_samples*self.dt_est:.3f}s)")
         return int(lag_samples)
 
     def phase_shift_error(self, ref: List[float], fb: List[float], lag_samples: int) -> List[float]:
@@ -604,9 +664,9 @@ class TrajFollowRecordActionServer(Node):
         n_joint_rows = max(1, len(self.plot_joints))
 
         add_ee_pos = (len(self.ee_ref[0]) == len(self.t) and len(self.t) > 0)
-        add_ee_rpy = (len(self.ee_rpy_ref[0]) == len(self.t) and len(self.t) > 0)
+        add_ee_dist = (len(self.ee_dist_err) == len(self.t) and len(self.t) > 0)
 
-        rows = n_joint_rows + (3 if add_ee_pos else 0) + (3 if add_ee_rpy else 0)
+        rows = n_joint_rows + (3 if add_ee_pos else 0) + (1 if add_ee_dist else 0)
         fig, axs = plt.subplots(rows, 2, sharex=True, squeeze=False, figsize=(11, 2.2 * rows))
 
         # --- joints ---
@@ -616,6 +676,12 @@ class TrajFollowRecordActionServer(Node):
 
             axp.plot(self.t, self.ref[j], color="blue", linestyle="-", label="reference")
             axp.plot(self.t, self.fb[j],  color="green", linestyle="--", label="feedback")
+            
+            # ===== planの軌道をプロット =====
+            if self.plan_t and self.plan_pos and j < len(self.plan_pos[0]):
+                plan_joint_pos = [pos[j] for pos in self.plan_pos if j < len(pos)]
+                axp.plot(self.plan_t, plan_joint_pos, color="orange", linestyle=":", 
+                         linewidth=2, label="plan", alpha=0.7)
 
             axe.plot(self.t, self.err[j], color="red", linestyle="-", label="error")
 
@@ -684,41 +750,34 @@ class TrajFollowRecordActionServer(Node):
 
             r0 += 3
 
-        # --- end-effector orientation RPY ---
-        # if add_ee_rpy:
-        #     labels = ["ee_roll (rad)", "ee_pitch (rad)", "ee_yaw (rad)"]
-        #     for i in range(3):
-        #         r = r0 + i
-        #         axp = axs[r][0]
-        #         axe = axs[r][1]
+        # --- end-effector 3D distance error ---
+        if add_ee_dist:
+            r = r0
+            axp = axs[r][0]
+            axe = axs[r][1]
 
-        #         axp.plot(self.t, self.ee_rpy_ref[i], color="blue", linestyle="-", label="ee_rpy_reference")
-        #         axp.plot(self.t, self.ee_rpy_fb[i],  color="green", linestyle="--", label="ee_rpy_feedback")
-        #         axe.plot(self.t, self.ee_rpy_err[i], color="red", linestyle="-", label="ee_rpy_error")
-
-        #         lag = self.estimate_lag_samples(self.ee_rpy_ref[i], self.ee_rpy_fb[i], max_lag_s=self.max_lag_s)
-        #         ph_err = self.phase_shift_error(self.ee_rpy_ref[i], self.ee_rpy_fb[i], lag_samples=lag)
-        #         axe.plot(self.t, ph_err, color="purple", linestyle="--",
-        #                  label=f"ee_rpy_phase-error (lag={lag} samples)")
-
-        #         # 最大誤差を計算して表示
-        #         max_rpy_err = max_abs(self.ee_rpy_err[i])
-        #         max_rpy_ph_err = max_abs(ph_err)
-
-        #         axp.set_ylabel(labels[i])
-        #         axe.set_ylabel(labels[i].replace("(rad)", "err (rad)"))
-        #         axp.grid(True)
-        #         axe.grid(True)
-                
-        #         # 最大誤差をグラフ上部に表示
-        #         axe.text(0.02, 0.98, f"Max err: {max_rpy_err:.6f} rad\nMax phase-err: {max_rpy_ph_err:.6f} rad", 
-        #                  transform=axe.transAxes, verticalalignment='top',
-        #                  bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5),
-        #                  fontsize=8)
-
-        #         if r == r0:  # 最初のRPYプロットのみlegendを表示
-        #             axp.legend(loc="upper right")
-        #             axe.legend(loc="upper right")
+            # 左側：3D距離誤差のグラフ
+            axe.plot(self.t, self.ee_dist_err, color="red", linestyle="-", label="3D distance error")
+            
+            # phase-shift errorも計算（ee_dist_errは常に正なのでphase補正の意味は薄いが一応）
+            # 仮にee_xを基準にlagを計算
+            if len(self.ee_ref[0]) == len(self.t):
+                lag = self.estimate_lag_samples(self.ee_ref[0], self.ee_fb[0], max_lag_s=self.max_lag_s)
+                ph_err = self.phase_shift_error([0]*len(self.t), self.ee_dist_err, lag_samples=lag)
+                # 3D距離は差分を取らないので、位相補正はスキップ
+            
+            max_dist_err = max_abs(self.ee_dist_err)
+            
+            axe.set_ylabel("ee 3D dist err (m)")
+            axe.grid(True)
+            axe.text(0.02, 0.98, f"Max 3D err: {max_dist_err:.6f} m", 
+                     transform=axe.transAxes, verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.5),
+                     fontsize=8)
+            axe.legend(loc="upper right")
+            
+            # 右側：空欄（または統計情報など）
+            axp.axis('off')  # 右側は非表示
 
         axs[-1][0].set_xlabel("time (s)")
         axs[-1][1].set_xlabel("time (s)")
@@ -732,6 +791,7 @@ class TrajFollowRecordActionServer(Node):
         add_ee_pos = (len(self.ee_ref[0]) == len(self.t) and len(self.t) > 0)
         add_ee_rpy = (len(self.ee_rpy_ref[0]) == len(self.t) and len(self.t) > 0)
         add_ee_quat = (len(self.ee_quat_ref[0]) == len(self.t) and len(self.t) > 0)
+        add_plan = (len(self.plan_t) > 0 and len(self.plan_pos) > 0)
 
         with open(path, "w", encoding="utf-8") as f:
             header = ["t"]
@@ -740,11 +800,14 @@ class TrajFollowRecordActionServer(Node):
             for j in self.plot_joints:
                 joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
                 header += [f"{joint_name}_ref", f"{joint_name}_fb", f"{joint_name}_err", f"{joint_name}_vel"]
+                if add_plan:
+                    header += [f"{joint_name}_plan"]
 
             if add_ee_pos:
                 header += ["ee_ref_x", "ee_ref_y", "ee_ref_z",
                            "ee_fb_x",  "ee_fb_y",  "ee_fb_z",
-                           "ee_err_x", "ee_err_y", "ee_err_z"]
+                           "ee_err_x", "ee_err_y", "ee_err_z",
+                           "ee_dist_err"]
 
             if add_ee_rpy:
                 header += ["ee_rpy_ref_roll", "ee_rpy_ref_pitch", "ee_rpy_ref_yaw",
@@ -765,10 +828,17 @@ class TrajFollowRecordActionServer(Node):
                     row.append(f"{self.fb[j][i]}")
                     row.append(f"{self.err[j][i]}")
                     row.append(f"{self.vel[j][i]}")
+                    
+                    # planデータを追加（時刻が近いものを補間または最近傍で取得）
+                    if add_plan:
+                        plan_val = self._get_plan_value_at_time(t, j)
+                        row.append(f"{plan_val}")
+
                 if add_ee_pos:
                     row += [f"{self.ee_ref[0][i]}", f"{self.ee_ref[1][i]}", f"{self.ee_ref[2][i]}",
                             f"{self.ee_fb[0][i]}",  f"{self.ee_fb[1][i]}",  f"{self.ee_fb[2][i]}",
-                            f"{self.ee_err[0][i]}", f"{self.ee_err[1][i]}", f"{self.ee_err[2][i]}"]
+                            f"{self.ee_err[0][i]}", f"{self.ee_err[1][i]}", f"{self.ee_err[2][i]}",
+                            f"{self.ee_dist_err[i]}"]
 
                 if add_ee_rpy:
                     row += [f"{self.ee_rpy_ref[0][i]}", f"{self.ee_rpy_ref[1][i]}", f"{self.ee_rpy_ref[2][i]}",
@@ -780,6 +850,37 @@ class TrajFollowRecordActionServer(Node):
                             f"{self.ee_quat_fb[0][i]}",  f"{self.ee_quat_fb[1][i]}",  f"{self.ee_quat_fb[2][i]}",  f"{self.ee_quat_fb[3][i]}"]
 
                 f.write(",".join(row) + "\n")
+
+    def _get_plan_value_at_time(self, t: float, joint_idx: int) -> float:
+        """指定時刻tにおけるplan軌道の関節値を取得（線形補間）"""
+        if not self.plan_t or not self.plan_pos:
+            return math.nan
+        
+        # tがplan時刻の範囲外ならnan
+        if t < self.plan_t[0] or t > self.plan_t[-1]:
+            return math.nan
+        
+        # 最近傍または線形補間でplan値を取得
+        for i in range(len(self.plan_t) - 1):
+            if self.plan_t[i] <= t <= self.plan_t[i + 1]:
+                # 線形補間
+                t0, t1 = self.plan_t[i], self.plan_t[i + 1]
+                if joint_idx < len(self.plan_pos[i]) and joint_idx < len(self.plan_pos[i + 1]):
+                    v0 = self.plan_pos[i][joint_idx]
+                    v1 = self.plan_pos[i + 1][joint_idx]
+                    if t1 - t0 > 1e-9:
+                        alpha = (t - t0) / (t1 - t0)
+                        return v0 + alpha * (v1 - v0)
+                    else:
+                        return v0
+                else:
+                    return math.nan
+        
+        # 最後の点を超えた場合は最後の値
+        if joint_idx < len(self.plan_pos[-1]):
+            return self.plan_pos[-1][joint_idx]
+        
+        return math.nan
 
     def _finalize_and_save(self) -> Tuple[bool, str]:
         if len(self.t) == 0:
