@@ -1,0 +1,40 @@
+[INFO] [1772381316.777104209] [rosbag2_recorder]: Press SPACE for pausing/resuming
+[INFO] [1772381316.780521609] [rosbag2_storage]: Opened database '/home/common/3_SIP/tms_ws/src/traj_follow_measurement/data/run_20260302_010836/bag/bag_0.db3' for READ_WRITE.
+[INFO] [1772381316.786294843] [rosbag2_recorder]: Listening for topics...
+[INFO] [1772381316.786710922] [rosbag2_recorder]: Event publisher thread: Starting
+[INFO] [1772381316.791313329] [rosbag2_recorder]: Subscribed to topic '/rosout'
+[INFO] [1772381316.793105655] [rosbag2_recorder]: Subscribed to topic '/events/write_split'
+[INFO] [1772381316.793205809] [rosbag2_recorder]: Recording...
+[WARN] [1772381316.897221528] [ROSBAG2_TRANSPORT]: Hidden topics are not recorded. Enable them with --include-hidden-topics
+[INFO] [1772381316.906186575] [rosbag2_recorder]: Subscribed to topic '/zx200/dynamic_joint_states'
+[INFO] [1772381316.910412155] [rosbag2_recorder]: Subscribed to topic '/zx200/display_planned_path'
+[INFO] [1772381316.934171862] [rosbag2_recorder]: Subscribed to topic '/parameter_events'
+[INFO] [1772381316.938869801] [rosbag2_recorder]: Subscribed to topic '/zx200/base_link/pose'
+[INFO] [1772381316.942035426] [rosbag2_recorder]: Subscribed to topic '/c30r/odom'
+[INFO] [1772381316.945667317] [rosbag2_recorder]: Subscribed to topic '/zx200/planning_scene_world'
+[INFO] [1772381316.950117706] [rosbag2_recorder]: Subscribed to topic '/zx200/attached_collision_object'
+[INFO] [1772381316.954617991] [rosbag2_recorder]: Subscribed to topic '/tf_static'
+[INFO] [1772381316.957254977] [rosbag2_recorder]: Subscribed to topic '/zx200/display_contacts'
+[INFO] [1772381316.959128829] [rosbag2_recorder]: Subscribed to topic '/tf'
+[INFO] [1772381316.961340041] [rosbag2_recorder]: Subscribed to topic '/zx200/odom'
+[INFO] [1772381316.963538787] [rosbag2_recorder]: Subscribed to topic '/clock'
+[INFO] [1772381316.965294395] [rosbag2_recorder]: Subscribed to topic '/zx200/joint_state_broadcaster/transition_event'
+[INFO] [1772381316.967271253] [rosbag2_recorder]: Subscribed to topic '/c30r/base_link/pose'
+[INFO] [1772381316.968908416] [rosbag2_recorder]: Subscribed to topic '/zx200/upper_arm_controller/transition_event'
+[INFO] [1772381316.971153058] [rosbag2_recorder]: Subscribed to topic '/zx200/robot_description'
+[INFO] [1772381316.973045110] [rosbag2_recorder]: Subscribed to topic '/zx200/trajectory_execution_event'
+[INFO] [1772381316.974657508] [rosbag2_recorder]: Subscribed to topic '/zx200/robot_description_semantic'
+[INFO] [1772381316.976215936] [rosbag2_recorder]: Subscribed to topic '/zx200/motion_plan_request'
+[INFO] [1772381316.980029982] [rosbag2_recorder]: Subscribed to topic '/zx200/upper_arm_controller/state'
+[INFO] [1772381316.981860170] [rosbag2_recorder]: Subscribed to topic '/zx200/upper_arm_controller/controller_state'
+[INFO] [1772381316.983256565] [rosbag2_recorder]: Subscribed to topic '/zx200/rviz_moveit_motion_planning_display/robot_interaction_interactive_marker_topic/feedback'
+[INFO] [1772381316.984981773] [rosbag2_recorder]: Subscribed to topic '/zx200/monitored_planning_scene'
+[INFO] [1772381316.987210297] [rosbag2_recorder]: Subscribed to topic '/zx200/planning_scene'
+[INFO] [1772381316.988294265] [rosbag2_recorder]: Subscribed to topic '/zx200/joint_states'
+[INFO] [1772381316.989171664] [rosbag2_recorder]: Subscribed to topic '/zx200/rviz_moveit_motion_planning_display/robot_interaction_interactive_marker_topic/update'
+[INFO] [1772381316.993090100] [rosbag2_recorder]: Subscribed to topic '/zx200/front_cmd'
+[INFO] [1772381317.106894548] [rosbag2_recorder]: Subscribed to topic '/emergency_signal'
+[INFO] [1772381317.108965774] [rosbag2_recorder]: Subscribed to topic '/task_sequence'
+[INFO] [1772381323.955671211] [rosbag2_cpp]: Writing remaining messages from cache to the bag. It may take a while
+[INFO] [1772381323.969348110] [rosbag2_recorder]: Event publisher thread: Exiting
+[INFO] [1772381323.969486690] [rosbag2_recorder]: Recording stopped

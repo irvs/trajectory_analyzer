@@ -164,6 +164,7 @@ class TrajFollowRecordActionServer(Node):
         self.out_png = ""
         self.out_csv = ""
         self.out_plan = ""
+        self.out_plan_csv = ""
         self.bag_dir = ""
 
         # 記録データ
@@ -215,6 +216,10 @@ class TrajFollowRecordActionServer(Node):
         # ===== plan trajectory buffers =====
         self.plan_t = []
         self.plan_pos = []
+        self.plan_joint_names = []  # Plan軌道の関節名を保存
+        
+        # ===== plan EE position buffers =====
+        self.ee_plan = [[], [], []]  # x, y, z
 
     # ---------------------------
     # FK init
@@ -362,6 +367,7 @@ class TrajFollowRecordActionServer(Node):
         self.out_png = os.path.join(self.out_dir, "plot.png")
         self.out_csv = os.path.join(self.out_dir, "data.csv")
         self.out_plan = os.path.join(self.out_dir, "plan.yaml")
+        self.out_plan_csv = os.path.join(self.out_dir, "plan.csv")
         self.bag_dir = os.path.join(self.out_dir, "bag")
 
         self.get_logger().info(f"Output dir: {self.out_dir}")
@@ -395,6 +401,7 @@ class TrajFollowRecordActionServer(Node):
         """planからtime_from_startと関節位置を抽出"""
         self.plan_t = []
         self.plan_pos = []
+        self.plan_joint_names = []  # Plan軌道の関節名を保存
         
         try:
             for robot_traj in plan_trajectories:
@@ -403,6 +410,8 @@ class TrajFollowRecordActionServer(Node):
                 
                 # joint_namesを取得（関節の順序を把握）
                 joint_names = list(joint_traj.joint_names)
+                if not self.plan_joint_names:
+                    self.plan_joint_names = joint_names
                 
                 # 各pointから時刻と位置を抽出
                 for point in joint_traj.points:
@@ -416,6 +425,9 @@ class TrajFollowRecordActionServer(Node):
             
             if self.plan_t:
                 self.get_logger().info(f"Extracted plan trajectory: {len(self.plan_t)} points")
+                
+                # ===== planからEE位置をFKで計算 =====
+                self._compute_plan_ee_positions()
             else:
                 self.get_logger().warn("No trajectory points found in plan")
                 
@@ -423,6 +435,62 @@ class TrajFollowRecordActionServer(Node):
             self.get_logger().warn(f"Failed to extract plan trajectory: {e}\n{traceback.format_exc()}")
             self.plan_t = []
             self.plan_pos = []
+
+    def _compute_plan_ee_positions(self):
+        """Plan軌道の各点でFKを計算してEE位置を保存"""
+        if not self._fk_ready or self._fk_solver is None:
+            self.get_logger().warn("FK not ready; skipping plan EE position calculation")
+            return
+        
+        if not self.plan_joint_names:
+            self.get_logger().warn("Plan joint names not available; skipping plan EE position calculation")
+            return
+        
+        self.ee_plan = [[], [], []]  # x, y, z
+        
+        try:
+            nj = len(self._chain_joint_names)
+            
+            # Plan軌道のjoint_namesからchain_joint_namesへのマッピングを作成
+            plan_to_chain_index = {}
+            for k, chain_jn in enumerate(self._chain_joint_names):
+                if chain_jn in self.plan_joint_names:
+                    plan_to_chain_index[k] = self.plan_joint_names.index(chain_jn)
+                else:
+                    self.get_logger().warn(f"Chain joint '{chain_jn}' not found in plan joint names")
+            
+            for positions in self.plan_pos:
+                q = PyKDL.JntArray(nj)
+                
+                # 関節角度をセット（plan_joint_namesの順序から変換）
+                for k, chain_jn in enumerate(self._chain_joint_names):
+                    if k in plan_to_chain_index:
+                        plan_idx = plan_to_chain_index[k]
+                        if plan_idx < len(positions):
+                            q[k] = positions[plan_idx]
+                        else:
+                            q[k] = 0.0
+                    else:
+                        q[k] = 0.0
+                
+                # FK計算
+                frame = PyKDL.Frame()
+                ret = self._fk_solver.JntToCart(q, frame)
+                
+                if ret >= 0:
+                    self.ee_plan[0].append(frame.p[0])  # x
+                    self.ee_plan[1].append(frame.p[1])  # y
+                    self.ee_plan[2].append(frame.p[2])  # z
+                else:
+                    self.ee_plan[0].append(math.nan)
+                    self.ee_plan[1].append(math.nan)
+                    self.ee_plan[2].append(math.nan)
+            
+            self.get_logger().info(f"Computed plan EE positions: {len(self.ee_plan[0])} points")
+            
+        except Exception as e:
+            self.get_logger().warn(f"Failed to compute plan EE positions: {e}\n{traceback.format_exc()}")
+            self.ee_plan = [[], [], []]
 
     # ---------------------------
     # Recording buffers
@@ -453,6 +521,7 @@ class TrajFollowRecordActionServer(Node):
         # ===== plan trajectory buffers =====
         self.plan_t = []
         self.plan_pos = []
+        self.plan_joint_names = []
 
     def _ensure_buffers(self, n_all: int):
         if self.n_all == n_all and self.ref:
@@ -534,10 +603,10 @@ class TrajFollowRecordActionServer(Node):
                 q_ref = PyKDL.JntArray(nj)
                 q_fb  = PyKDL.JntArray(nj)
 
-                for k, jn in enumerate(self._chain_joint_names):  # enumerate を追加
+                for k, jn in enumerate(self._chain_joint_names):
                     idx = self._joint_name_to_msg_index[jn]
                     q_ref[k] = ref_pos[idx] if idx < len(ref_pos) else float("nan")
-                    q_fb[k]  = fb_pos[idx]  if idx < len(fb_pos)  else float("nan")
+                    q_fb[k]  = fb_pos[idx] if idx < len(fb_pos) else float("nan")
 
                 fr_ref = PyKDL.Frame()
                 fr_fb  = PyKDL.Frame()
@@ -680,8 +749,8 @@ class TrajFollowRecordActionServer(Node):
             # ===== planの軌道をプロット =====
             if self.plan_t and self.plan_pos and j < len(self.plan_pos[0]):
                 plan_joint_pos = [pos[j] for pos in self.plan_pos if j < len(pos)]
-                axp.plot(self.plan_t, plan_joint_pos, color="orange", linestyle=":", 
-                         linewidth=2, label="plan", alpha=0.7)
+                axp.plot(self.plan_t, plan_joint_pos, 'o', color="orange", 
+                         markersize=3, label="plan", alpha=0.7)
 
             axe.plot(self.t, self.err[j], color="red", linestyle="-", label="error")
 
@@ -715,6 +784,8 @@ class TrajFollowRecordActionServer(Node):
         # --- end-effector position XYZ ---
         if add_ee_pos:
             labels = ["ee_x (m)", "ee_y (m)", "ee_z (m)"]
+            add_ee_plan = (len(self.ee_plan[0]) == len(self.plan_t) and len(self.plan_t) > 0)
+            
             for i in range(3):
                 r = r0 + i
                 axp = axs[r][0]
@@ -722,6 +793,12 @@ class TrajFollowRecordActionServer(Node):
 
                 axp.plot(self.t, self.ee_ref[i], color="blue", linestyle="-", label="ee_reference")
                 axp.plot(self.t, self.ee_fb[i],  color="green", linestyle="--", label="ee_feedback")
+                
+                # ===== planのEE軌道をプロット =====
+                if add_ee_plan:
+                    axp.plot(self.plan_t, self.ee_plan[i], 'o', color="orange", 
+                             markersize=3, label="ee_plan", alpha=0.7)
+                
                 axe.plot(self.t, self.ee_err[i], color="red", linestyle="-", label="ee_error")
 
                 lag = self.estimate_lag_samples(self.ee_ref[i], self.ee_fb[i], max_lag_s=self.max_lag_s)
@@ -791,7 +868,6 @@ class TrajFollowRecordActionServer(Node):
         add_ee_pos = (len(self.ee_ref[0]) == len(self.t) and len(self.t) > 0)
         add_ee_rpy = (len(self.ee_rpy_ref[0]) == len(self.t) and len(self.t) > 0)
         add_ee_quat = (len(self.ee_quat_ref[0]) == len(self.t) and len(self.t) > 0)
-        add_plan = (len(self.plan_t) > 0 and len(self.plan_pos) > 0)
 
         with open(path, "w", encoding="utf-8") as f:
             header = ["t"]
@@ -800,8 +876,6 @@ class TrajFollowRecordActionServer(Node):
             for j in self.plot_joints:
                 joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
                 header += [f"{joint_name}_ref", f"{joint_name}_fb", f"{joint_name}_err", f"{joint_name}_vel"]
-                if add_plan:
-                    header += [f"{joint_name}_plan"]
 
             if add_ee_pos:
                 header += ["ee_ref_x", "ee_ref_y", "ee_ref_z",
@@ -814,7 +888,6 @@ class TrajFollowRecordActionServer(Node):
                            "ee_rpy_fb_roll",  "ee_rpy_fb_pitch",  "ee_rpy_fb_yaw",
                            "ee_rpy_err_roll", "ee_rpy_err_pitch", "ee_rpy_err_yaw"]
 
-            # Quaternion は "差" の扱いが難しいので（符号反転同値など）、ref/fb のみ保存
             if add_ee_quat:
                 header += ["ee_quat_ref_x", "ee_quat_ref_y", "ee_quat_ref_z", "ee_quat_ref_w",
                            "ee_quat_fb_x",  "ee_quat_fb_y",  "ee_quat_fb_z",  "ee_quat_fb_w"]
@@ -828,11 +901,6 @@ class TrajFollowRecordActionServer(Node):
                     row.append(f"{self.fb[j][i]}")
                     row.append(f"{self.err[j][i]}")
                     row.append(f"{self.vel[j][i]}")
-                    
-                    # planデータを追加（時刻が近いものを補間または最近傍で取得）
-                    if add_plan:
-                        plan_val = self._get_plan_value_at_time(t, j)
-                        row.append(f"{plan_val}")
 
                 if add_ee_pos:
                     row += [f"{self.ee_ref[0][i]}", f"{self.ee_ref[1][i]}", f"{self.ee_ref[2][i]}",
@@ -851,36 +919,47 @@ class TrajFollowRecordActionServer(Node):
 
                 f.write(",".join(row) + "\n")
 
-    def _get_plan_value_at_time(self, t: float, joint_idx: int) -> float:
-        """指定時刻tにおけるplan軌道の関節値を取得（線形補間）"""
+    def save_plan_csv(self, path: str):
+        """Plan軌道専用のCSVを保存（時刻、関節角度、EE位置のみ）"""
         if not self.plan_t or not self.plan_pos:
-            return math.nan
+            self.get_logger().warn("No plan data to save")
+            return
         
-        # tがplan時刻の範囲外ならnan
-        if t < self.plan_t[0] or t > self.plan_t[-1]:
-            return math.nan
+        with open(path, "w", encoding="utf-8") as f:
+            header = ["t"]
+            
+            # 関節名
+            for j in self.plot_joints:
+                joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
+                header.append(joint_name)
+            
+            # EE位置
+            if len(self.ee_plan[0]) > 0:
+                header += ["ee_x", "ee_y", "ee_z"]
+            
+            f.write(",".join(header) + "\n")
+            
+            # データ行
+            for i, t in enumerate(self.plan_t):
+                row = [f"{t:.9f}"]
+                
+                # 関節角度
+                if i < len(self.plan_pos):
+                    for j in self.plot_joints:
+                        if j < len(self.plan_pos[i]):
+                            row.append(f"{self.plan_pos[i][j]}")
+                        else:
+                            row.append("nan")
+                
+                # EE位置
+                if len(self.ee_plan[0]) > 0 and i < len(self.ee_plan[0]):
+                    row.append(f"{self.ee_plan[0][i]}")
+                    row.append(f"{self.ee_plan[1][i]}")
+                    row.append(f"{self.ee_plan[2][i]}")
+                
+                f.write(",".join(row) + "\n")
         
-        # 最近傍または線形補間でplan値を取得
-        for i in range(len(self.plan_t) - 1):
-            if self.plan_t[i] <= t <= self.plan_t[i + 1]:
-                # 線形補間
-                t0, t1 = self.plan_t[i], self.plan_t[i + 1]
-                if joint_idx < len(self.plan_pos[i]) and joint_idx < len(self.plan_pos[i + 1]):
-                    v0 = self.plan_pos[i][joint_idx]
-                    v1 = self.plan_pos[i + 1][joint_idx]
-                    if t1 - t0 > 1e-9:
-                        alpha = (t - t0) / (t1 - t0)
-                        return v0 + alpha * (v1 - v0)
-                    else:
-                        return v0
-                else:
-                    return math.nan
-        
-        # 最後の点を超えた場合は最後の値
-        if joint_idx < len(self.plan_pos[-1]):
-            return self.plan_pos[-1][joint_idx]
-        
-        return math.nan
+        self.get_logger().info(f"Saved plan CSV: {path}")
 
     def _finalize_and_save(self) -> Tuple[bool, str]:
         if len(self.t) == 0:
@@ -889,8 +968,9 @@ class TrajFollowRecordActionServer(Node):
         fig = self.make_final_plot()
         fig.savefig(self.out_png, dpi=150)
         self.save_csv(self.out_csv)
+        self.save_plan_csv(self.out_plan_csv)
 
-        return True, f"Saved: {self.out_png}, {self.out_csv}, {self.out_plan}, bag={self.bag_dir}"
+        return True, f"Saved: {self.out_png}, {self.out_csv}, {self.out_plan}, {self.out_plan_csv}, bag={self.bag_dir}"
 
     # ---------------------------
     # ros2 bag record -a

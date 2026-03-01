@@ -74,6 +74,25 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /video_gen/path_fb
+    - Alpha: 1.0
+      Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Plan EE Markers
+      Namespaces:
+        plan_ee: true
+        plan_ee_line: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /video_gen/plan_ee_markers
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /video_gen/plan_ee_markers/update
     - Class: rviz_default_plugins/TF
       Name: TF
       Enabled: true
