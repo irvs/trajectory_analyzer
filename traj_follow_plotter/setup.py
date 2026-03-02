@@ -16,6 +16,7 @@ setup(
         (os.path.join('share', package_name, 'meshes'), glob('meshes/*.dae')),
         (os.path.join('share', package_name, 'meshes'), glob('meshes/*.xacro')),
         (os.path.join('share', package_name, 'meshes'), glob('meshes/*.png')),
+        (os.path.join('share', package_name, 'urdf'), glob('urdf/*.urdf')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

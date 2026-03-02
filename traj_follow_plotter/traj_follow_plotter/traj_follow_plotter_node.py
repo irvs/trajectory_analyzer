@@ -123,8 +123,13 @@ class TrajFollowRecordActionServer(Node):
         self.err: List[List[float]] = []
         self.vel: List[List[float]] = []
 
+        from ament_index_python.packages import get_package_share_directory
+        pkg_share = get_package_share_directory('traj_follow_plotter')
+        default_output = os.path.join(pkg_share, "..", "..", "..", "data")
+        default_urdf = os.path.join(pkg_share, "urdf", "zx200.urdf")
+
         self.declare_parameter("state_topic", "/zx200/upper_arm_controller/controller_state")
-        self.declare_parameter("output_root", "/home/common/3_SIP/tms_ws/src/traj_follow_measurement/data")
+        self.declare_parameter("output_root", os.path.normpath(default_output))
         self.declare_parameter("record_bag_all", True)     # -a 相当をデフォルトで回すか
 
         self.declare_parameter("max_lag_s", 5.0)
@@ -132,7 +137,7 @@ class TrajFollowRecordActionServer(Node):
         self.declare_parameter("lag_method", "frequency")  # "correlation", "dtw", "gradient", "adaptive_kalman", "frequency", "polynomial"
 
         # ===== FK/URDF 追加パラメータ =====
-        self.declare_parameter("urdf_path", "/home/common/3_SIP/tms_ws/src/traj_follow_measurement/traj_follow_plotter/urdf/zx200.urdf")
+        self.declare_parameter("urdf_path", os.path.normpath(default_urdf))  # 相対パス: traj_follow_plotterから見て../urdf/
         self.declare_parameter("fk_base_link", "base_link")
         self.declare_parameter("fk_tip_link", "bucket_end_link")
 
