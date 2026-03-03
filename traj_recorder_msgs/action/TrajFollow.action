@@ -1,7 +1,7 @@
 # Goal
-float32 time_scaling
-float32 velocity_scaling
-float32 acceleration_scaling
+float32[] time_scaling
+float32[] velocity_scaling
+float32[] acceleration_scaling
 moveit_msgs/RobotTrajectory plan
 
 ---

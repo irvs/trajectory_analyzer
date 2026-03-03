@@ -206,11 +206,11 @@ class VideoPlayerNode(Node):
         """1フレーム分のJointStateを配信"""
         if self.frame_idx >= len(self.data):
             if self.loop:
-                self.frame_idx = 0
-                # ループ時にPathをリセット
+                # ループ時にPathをリセット（フレームインデックスをリセットする前に）
                 self.path_ref.poses.clear()
                 self.path_fb.poses.clear()
                 self.get_logger().info("Looping playback... (Path reset)")
+                self.frame_idx = 0
             else:
                 self.get_logger().info("Playback finished")
                 self.timer.cancel()

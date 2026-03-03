@@ -30,6 +30,7 @@ setup(
             'plot = traj_follow_plotter.traj_follow_plotter_node:main',
             'video_player = traj_follow_plotter.video_player_node:main',
             'generate_rviz_config = traj_follow_plotter.generate_rviz_config:main',
+            'post_analysis = traj_follow_plotter.post_process_analysis:main',
         ],
     },
 )

@@ -37,6 +37,13 @@ import PyKDL
 
 import traceback
 
+# ===== 共通モジュールをインポート =====
+from .trajectory_analyzer import (
+    TrajectoryAnalyzer,
+    max_abs,
+    quat_to_rpy
+)
+
 
 def pick_fields(msg: JointTrajectoryControllerState):
     """
@@ -51,43 +58,6 @@ def pick_fields(msg: JointTrajectoryControllerState):
     raise RuntimeError(
         "Expected reference/feedback or desired/actual fields in JointTrajectoryControllerState."
     )
-
-
-def max_abs(xs: List[float]) -> float:
-    m = 0.0
-    for v in xs:
-        if v is None:
-            continue
-        try:
-            if isinstance(v, float) and math.isnan(v):
-                continue
-        except Exception:
-            pass
-        av = abs(v)
-        if av > m:
-            m = av
-    return m
-
-def quat_to_rpy(x: float, y: float, z: float, w: float) -> Tuple[float, float, float]:
-    # ZYX (roll-pitch-yaw) 変換
-    # roll (x-axis rotation)
-    sinr_cosp = 2.0 * (w * x + y * z)
-    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-    roll = math.atan2(sinr_cosp, cosr_cosp)
-
-    # pitch (y-axis rotation)
-    sinp = 2.0 * (w * y - z * x)
-    if abs(sinp) >= 1.0:
-        pitch = math.copysign(math.pi / 2.0, sinp)
-    else:
-        pitch = math.asin(sinp)
-
-    # yaw (z-axis rotation)
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
-
-    return roll, pitch, yaw
 
 
 class TrajFollowRecordActionServer(Node):
@@ -130,7 +100,7 @@ class TrajFollowRecordActionServer(Node):
 
         self.declare_parameter("state_topic", "/zx200/upper_arm_controller/controller_state")
         self.declare_parameter("output_root", os.path.normpath(default_output))
-        self.declare_parameter("record_bag_all", True)     # -a 相当をデフォルトで回すか
+        self.declare_parameter("record_bag_all", True)     # -a相当をデフォルトで回すか
 
         self.declare_parameter("max_lag_s", 5.0)
         self.declare_parameter("phase_use_velocity", False)
@@ -140,6 +110,13 @@ class TrajFollowRecordActionServer(Node):
         self.declare_parameter("urdf_path", os.path.normpath(default_urdf))  # 相対パス: traj_follow_plotterから見て../urdf/
         self.declare_parameter("fk_base_link", "base_link")
         self.declare_parameter("fk_tip_link", "bucket_end_link")
+
+        # ===== 共通解析器を作成 =====
+        self.analyzer = TrajectoryAnalyzer(
+            max_lag_s=float(self.get_parameter("max_lag_s").value),
+            lag_method=str(self.get_parameter("lag_method").value),
+            phase_use_velocity=bool(self.get_parameter("phase_use_velocity").value)
+        )
 
         # ---- Action Server ----
         self._action_srv = ActionServer(
@@ -229,12 +206,6 @@ class TrajFollowRecordActionServer(Node):
         
         # ===== plan EE position buffers =====
         self.ee_plan = [[], [], []]  # x, y, z
-
-        # ===== 適応カルマンフィルタ用の状態 =====
-        self.kalman_lag_estimate = 0.0  # 現在の遅れ推定値
-        self.kalman_lag_variance = 1.0  # 推定値の分散
-        self.kalman_process_noise = 0.01  # プロセスノイズ（遅れの変動）
-        self.kalman_measurement_noise = 0.1  # 観測ノイズ
 
     # ---------------------------
     # FK init
@@ -400,14 +371,44 @@ class TrajFollowRecordActionServer(Node):
 
     def _save_plan_yaml(self, goal_msg: TrajFollow.Goal):
         data = {
-            "time_scaling": float(goal_msg.time_scaling),
-            "velocity_scaling": float(goal_msg.velocity_scaling),
-            "acceleration_scaling": float(goal_msg.acceleration_scaling),
+            "time_scaling": [float(x) for x in goal_msg.time_scaling],
+            "velocity_scaling": [float(x) for x in goal_msg.velocity_scaling],
+            "acceleration_scaling": [float(x) for x in goal_msg.acceleration_scaling],
             "plan": self._to_plain(message_to_ordereddict(goal_msg.plan)),
         }
         with open(self.out_plan, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
         self.get_logger().info(f"Saved plan: {self.out_plan}")
+        
+        # スケーリング値をログ出力とフォルダ名に含める
+        time_scale = data['time_scaling'][0] if data['time_scaling'] else 1.0
+        vel_scale = data['velocity_scaling'][0] if data['velocity_scaling'] else 0.0
+        acc_scale = data['acceleration_scaling'][0] if data['acceleration_scaling'] else 0.0
+        
+        self.get_logger().info(f"Scaling values - time: {time_scale:.3f}, velocity: {vel_scale:.3f}, accel: {acc_scale:.3f}")
+        
+        # フォルダ名にスケーリング値を追加してリネーム
+        old_dir = self.out_dir
+        parent_dir = os.path.dirname(old_dir)
+        base_name = os.path.basename(old_dir)
+        
+        # run_YYYYMMDD_HHMMSS_tXXX_vXXX_aXXX の形式
+        new_dir = os.path.join(parent_dir, f"{base_name}_t{time_scale:.3f}_v{vel_scale:.3f}_a{acc_scale:.3f}")
+        
+        try:
+            os.rename(old_dir, new_dir)
+            self.out_dir = new_dir
+            
+            # 全てのパスを更新
+            self.out_png = os.path.join(self.out_dir, "plot.png")
+            self.out_csv = os.path.join(self.out_dir, "data.csv")
+            self.out_plan = os.path.join(self.out_dir, "plan.yaml")
+            self.out_plan_csv = os.path.join(self.out_dir, "plan.csv")
+            self.bag_dir = os.path.join(self.out_dir, "bag")
+            
+            self.get_logger().info(f"Renamed output dir to: {self.out_dir}")
+        except Exception as e:
+            self.get_logger().warn(f"Failed to rename directory with scaling values: {e}")
         
         # ===== planから軌道データを抽出 =====
         self._extract_plan_trajectory(goal_msg.plan)
@@ -679,507 +680,17 @@ class TrajFollowRecordActionServer(Node):
                 self._fk_ready = False
 
     # ---------------------------
-    # Phase lag estimation (improved)
+    # Phase lag estimation は trajectory_analyzer.py の TrajectoryAnalyzer を使用
     # ---------------------------
-
-    def _finite_pair(self, a: np.ndarray, b: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        ok = np.isfinite(a) & np.isfinite(b)
-        return a[ok], b[ok]
-
-    def estimate_lag_dtw(self, ref: List[float], fb: List[float], max_lag_s: float) -> float:
-        """DTWベースの遅れ推定（サンプル単位ではなく時間[秒]で返す）"""
-        ref_arr = np.asarray(ref, dtype=float)
-        fb_arr  = np.asarray(fb, dtype=float)
-
-        ref_arr, fb_arr = self._finite_pair(ref_arr, fb_arr)
-        if len(ref_arr) < 20:
-            return 0.0
-
-        # 正規化
-        ref_arr = (ref_arr - np.mean(ref_arr)) / (np.std(ref_arr) + 1e-9)
-        fb_arr  = (fb_arr - np.mean(fb_arr)) / (np.std(fb_arr) + 1e-9)
-
-        n = len(ref_arr)
-        max_lag = int(max(0.0, max_lag_s) / self.dt_est)
-        
-        # 簡易DTW: Sakoe-Chiba band制約付き
-        window = min(max_lag, n // 2)
-        dtw_matrix = np.full((n, n), np.inf)
-        dtw_matrix[0, 0] = 0.0
-
-        for i in range(1, n):
-            for j in range(max(1, i - window), min(n, i + window + 1)):
-                cost = (ref_arr[i] - fb_arr[j]) ** 2
-                dtw_matrix[i, j] = cost + min(
-                    dtw_matrix[i-1, j],      # insertion
-                    dtw_matrix[i, j-1],      # deletion
-                    dtw_matrix[i-1, j-1]     # match
-                )
-
-        # バックトレースしてマッチングを取得
-        i, j = n - 1, n - 1
-        path_i, path_j = [i], [j]
-        
-        while i > 0 and j > 0:
-            candidates = [
-                (i-1, j, dtw_matrix[i-1, j]),
-                (i, j-1, dtw_matrix[i, j-1]),
-                (i-1, j-1, dtw_matrix[i-1, j-1])
-            ]
-            candidates = [(ii, jj, val) for ii, jj, val in candidates if np.isfinite(val)]
-            if not candidates:
-                break
-            
-            i, j, _ = min(candidates, key=lambda x: x[2])
-            path_i.append(i)
-            path_j.append(j)
-
-        # 平均的な遅れを計算
-        lag_samples = np.mean([path_i[k] - path_j[k] for k in range(len(path_i))])
-        lag_sec = lag_samples * self.dt_est
-        
-        self.get_logger().info(f"DTW lag estimation: {lag_sec:.3f}s ({lag_samples:.1f} samples)")
-        return max(0.0, lag_sec)
-
-    def estimate_lag_adaptive_kalman(self, ref: List[float], fb: List[float], max_lag_s: float) -> float:
-        """
-        適応カルマンフィルタによる遅れ推定
-        遅れが時間変動する場合に有効
-        """
-        ref_arr = np.asarray(ref, dtype=float)
-        fb_arr  = np.asarray(fb, dtype=float)
-
-        ref_arr, fb_arr = self._finite_pair(ref_arr, fb_arr)
-        if len(ref_arr) < 50:
-            return 0.0
-
-        # 正規化
-        ref_arr = (ref_arr - np.mean(ref_arr)) / (np.std(ref_arr) + 1e-9)
-        fb_arr  = (fb_arr - np.mean(fb_arr)) / (np.std(fb_arr) + 1e-9)
-
-        # ウィンドウサイズ（局所的な遅れ推定）
-        window_size = min(100, len(ref_arr) // 5)
-        max_lag_samples = int(max_lag_s / self.dt_est)
-
-        lag_estimates = []
-        
-        # スライディングウィンドウで遅れを推定
-        for i in range(window_size, len(ref_arr), window_size // 2):
-            ref_window = ref_arr[max(0, i - window_size):i]
-            fb_window  = fb_arr[max(0, i - window_size):i]
-            
-            if len(ref_window) < 20:
-                continue
-            
-            # 局所的な相関計算
-            corr = np.correlate(ref_window, fb_window, mode="full")
-            lags = np.arange(-len(fb_window) + 1, len(ref_window))
-            
-            m = (lags >= -max_lag_samples) & (lags <= max_lag_samples)
-            corr_filtered = corr[m]
-            lags_filtered = lags[m]
-            
-            if len(corr_filtered) > 0:
-                best_lag = -int(lags_filtered[np.argmax(corr_filtered)])
-                if 0 <= best_lag <= max_lag_samples:
-                    lag_estimates.append(best_lag)
-        
-        if not lag_estimates:
-            return 0.0
-        
-        # カルマンフィルタで平滑化
-        filtered_lag = self.kalman_lag_estimate
-        variance = self.kalman_lag_variance
-        
-        for measurement in lag_estimates:
-            # 予測ステップ
-            predicted_lag = filtered_lag
-            predicted_variance = variance + self.kalman_process_noise
-            
-            # 更新ステップ
-            kalman_gain = predicted_variance / (predicted_variance + self.kalman_measurement_noise)
-            filtered_lag = predicted_lag + kalman_gain * (measurement - predicted_lag)
-            variance = (1 - kalman_gain) * predicted_variance
-        
-        # 状態を保存（次回の推定に使用）
-        self.kalman_lag_estimate = filtered_lag
-        self.kalman_lag_variance = variance
-        
-        lag_sec = filtered_lag * self.dt_est
-        self.get_logger().info(f"Adaptive Kalman lag: {lag_sec:.3f}s (variance: {variance:.3f})")
-        return max(0.0, lag_sec)
-
-    def estimate_lag_frequency(self, ref: List[float], fb: List[float], max_lag_s: float) -> float:
-        """
-        周波数領域での位相差検出
-        周期的な動作に特に有効
-        """
-        ref_arr = np.asarray(ref, dtype=float)
-        fb_arr  = np.asarray(fb, dtype=float)
-
-        ref_arr, fb_arr = self._finite_pair(ref_arr, fb_arr)
-        if len(ref_arr) < 50:
-            return 0.0
-
-        # デトレンド（線形トレンド除去）
-        ref_arr = scipy_signal.detrend(ref_arr)
-        fb_arr  = scipy_signal.detrend(fb_arr)
-
-        # ゼロパディングでFFTの分解能向上
-        n = len(ref_arr)
-        n_fft = 2 ** int(np.ceil(np.log2(n * 2)))
-
-        # FFT
-        ref_fft = np.fft.rfft(ref_arr, n=n_fft)
-        fb_fft  = np.fft.rfft(fb_arr, n=n_fft)
-
-        # クロススペクトル
-        cross_spectrum = ref_fft * np.conj(fb_fft)
-        
-        # 位相差を計算
-        phase_diff = np.angle(cross_spectrum)
-        
-        # 周波数軸
-        freqs = np.fft.rfftfreq(n_fft, d=self.dt_est)
-        
-        # パワーが大きい周波数での位相差を重視
-        power = np.abs(cross_spectrum)
-        
-        # DC成分とナイキスト周波数を除外
-        valid_idx = (freqs > 0.01) & (freqs < 1.0 / (2 * self.dt_est) * 0.9) & (power > np.percentile(power, 50))
-        
-        if np.sum(valid_idx) < 5:
-            self.get_logger().warn("Not enough frequency components for lag estimation")
-            return 0.0
-        
-        # 重み付き平均で遅れを計算
-        # phase_diff = -2 * pi * freq * lag
-        # lag = -phase_diff / (2 * pi * freq)
-        
-        lags = []
-        weights = []
-        
-        for i in np.where(valid_idx)[0]:
-            if freqs[i] > 0:
-                lag_at_freq = -phase_diff[i] / (2 * np.pi * freqs[i])
-                
-                # 位相の折り返しを考慮（複数の候補から最も妥当なものを選択）
-                candidates = []
-                for k in range(-2, 3):  # ±2周期分の候補
-                    candidate = lag_at_freq + k / freqs[i]
-                    if 0 <= candidate <= max_lag_s:
-                        candidates.append(candidate)
-                
-                if candidates:
-                    # 最も中央値に近いものを選択
-                    best_candidate = min(candidates, key=lambda x: abs(x - max_lag_s / 2))
-                    lags.append(best_candidate)
-                    weights.append(power[i])
-        
-        if not lags:
-            return 0.0
-        
-        # 重み付き中央値
-        lags = np.array(lags)
-        weights = np.array(weights)
-        
-        # 外れ値除去（IQR法）
-        q1, q3 = np.percentile(lags, [25, 75])
-        iqr = q3 - q1
-        mask = (lags >= q1 - 1.5 * iqr) & (lags <= q3 + 1.5 * iqr)
-        
-        if np.sum(mask) > 0:
-            lags = lags[mask]
-            weights = weights[mask]
-        
-        # 重み付き平均
-        lag_sec = np.average(lags, weights=weights)
-        
-        self.get_logger().info(f"Frequency-based lag: {lag_sec:.3f}s (from {len(lags)} freq components)")
-        return max(0.0, min(lag_sec, max_lag_s))
-
-    def estimate_lag_polynomial(self, ref: List[float], fb: List[float], max_lag_s: float) -> float:
-        """
-        多項式フィッティング + 時間微分マッチング
-        ノイズに強い速度マッチング
-        """
-        ref_arr = np.asarray(ref, dtype=float)
-        fb_arr  = np.asarray(fb, dtype=float)
-
-        ref_arr, fb_arr = self._finite_pair(ref_arr, fb_arr)
-        if len(ref_arr) < 50:
-            return 0.0
-
-        # Savitzky-Golayフィルタで平滑化と微分を同時に実施
-        window_length = min(51, len(ref_arr) // 3)
-        if window_length % 2 == 0:
-            window_length -= 1
-        if window_length < 5:
-            return 0.0
-        
-        polyorder = 3
-        
-        try:
-            # 位置の平滑化
-            ref_smooth = scipy_signal.savgol_filter(ref_arr, window_length, polyorder)
-            fb_smooth  = scipy_signal.savgol_filter(fb_arr, window_length, polyorder)
-            
-            # 速度（1階微分）
-            ref_vel = scipy_signal.savgol_filter(ref_arr, window_length, polyorder, deriv=1, delta=self.dt_est)
-            fb_vel  = scipy_signal.savgol_filter(fb_arr, window_length, polyorder, deriv=1, delta=self.dt_est)
-            
-            # 加速度（2階微分）
-            ref_acc = scipy_signal.savgol_filter(ref_arr, window_length, polyorder, deriv=2, delta=self.dt_est)
-            fb_acc  = scipy_signal.savgol_filter(fb_arr, window_length, polyorder, deriv=2, delta=self.dt_est)
-            
-        except Exception as e:
-            self.get_logger().warn(f"Savitzky-Golay filter failed: {e}")
-            return 0.0
-
-        max_lag_samples = int(max_lag_s / self.dt_est)
-
-        # 3つの信号（位置、速度、加速度）で相関を計算して統合
-        lags_list = []
-        weights_list = []
-        
-        for signal_name, ref_sig, fb_sig in [
-            ("position", ref_smooth, fb_smooth),
-            ("velocity", ref_vel, fb_vel),
-            ("acceleration", ref_acc, fb_acc)
-        ]:
-            # 正規化
-            ref_norm = (ref_sig - np.mean(ref_sig)) / (np.std(ref_sig) + 1e-9)
-            fb_norm  = (fb_sig - np.mean(fb_sig)) / (np.std(fb_sig) + 1e-9)
-            
-            # 相関計算
-            corr = np.correlate(ref_norm, fb_norm, mode="full")
-            lags = np.arange(-len(fb_norm) + 1, len(ref_norm))
-            
-            m = (lags >= -max_lag_samples) & (lags <= max_lag_samples)
-            corr_filtered = corr[m]
-            lags_filtered = lags[m]
-            
-            if len(corr_filtered) > 0:
-                best_lag = -int(lags_filtered[np.argmax(corr_filtered)])
-                correlation_strength = np.max(corr_filtered) / len(ref_norm)
-                
-                if 0 <= best_lag <= max_lag_samples and correlation_strength > 0.1:
-                    lags_list.append(best_lag)
-                    # 速度と加速度の方が位相ずれを捉えやすいので重みを増やす
-                    if signal_name == "velocity":
-                        weights_list.append(correlation_strength * 2.0)
-                    elif signal_name == "acceleration":
-                        weights_list.append(correlation_strength * 1.5)
-                    else:
-                        weights_list.append(correlation_strength)
-        
-        if not lags_list:
-            return 0.0
-        
-        # 重み付き平均
-        lags_arr = np.array(lags_list)
-        weights_arr = np.array(weights_list)
-        
-        lag_samples = np.average(lags_arr, weights=weights_arr)
-        lag_sec = lag_samples * self.dt_est
-        
-        self.get_logger().info(f"Polynomial lag: {lag_sec:.3f}s (from {len(lags_list)} signals)")
-        return max(0.0, lag_sec)
-
-    def compute_compensated_error(self, ref: List[float], fb: List[float], max_lag_s: float) -> Tuple[List[float], float, List[float]]:
-        """
-        遅れ補正済み誤差を計算
-        
-        Returns:
-            (compensated_error, lag_sec, fb_shifted)
-        """
-        lag_method = str(self.get_parameter("lag_method").value)
-        
-        if lag_method == "dtw":
-            lag_sec = self.estimate_lag_dtw(ref, fb, max_lag_s)
-        elif lag_method == "gradient":
-            lag_sec = self.estimate_lag_gradient(ref, fb, max_lag_s)
-        elif lag_method == "adaptive_kalman":
-            lag_sec = self.estimate_lag_adaptive_kalman(ref, fb, max_lag_s)
-        elif lag_method == "frequency":
-            lag_sec = self.estimate_lag_frequency(ref, fb, max_lag_s)
-        elif lag_method == "polynomial":
-            lag_sec = self.estimate_lag_polynomial(ref, fb, max_lag_s)
-        else:  # "correlation"
-            lag_samples = self.estimate_lag_samples(ref, fb, max_lag_s)
-            lag_sec = lag_samples * self.dt_est
-
-        # 遅れ補正: fbを時間シフト（補間使用）
-        n = len(self.t)
-        if lag_sec <= 0 or len(ref) != n or len(fb) != n:
-            return [ref[i] - fb[i] if i < len(ref) and i < len(fb) else math.nan for i in range(n)], lag_sec, list(fb)
-
-        # 補間を使ってfbを時間シフト
-        t_arr = np.array(self.t)
-        fb_arr = np.array(fb)
-        ref_arr = np.array(ref)
-        
-        # 有効なデータのみ使用
-        valid = np.isfinite(fb_arr) & np.isfinite(t_arr)
-        if np.sum(valid) < 2:
-            return [math.nan] * n, lag_sec, [math.nan] * n
-        
-        try:
-            interp_func = interp1d(t_arr[valid], fb_arr[valid], 
-                                   kind='linear', bounds_error=False, fill_value=math.nan)
-            fb_shifted = interp_func(t_arr + lag_sec)
-            
-            compensated_err = [ref_arr[i] - fb_shifted[i] if np.isfinite(fb_shifted[i]) else math.nan 
-                              for i in range(n)]
-            
-            fb_shifted_list = list(fb_shifted)
-        except Exception as e:
-            self.get_logger().warn(f"Interpolation failed: {e}")
-            compensated_err = [math.nan] * n
-            fb_shifted_list = [math.nan] * n
-        
-        return compensated_err, lag_sec, fb_shifted_list
 
     # ---------------------------
     # Plot & CSV
     # ---------------------------
 
-    def make_final_plot(self):
-        n_joint_rows = max(1, len(self.plot_joints))
-
-        add_ee_pos = (len(self.ee_ref[0]) == len(self.t) and len(self.t) > 0)
-        add_ee_dist = (len(self.ee_dist_err) == len(self.t) and len(self.t) > 0)
-
-        rows = n_joint_rows + (3 if add_ee_pos else 0) + (1 if add_ee_dist else 0)
-        fig, axs = plt.subplots(rows, 2, sharex=True, squeeze=False, figsize=(11, 2.2 * rows))
-
-        lag_method = str(self.get_parameter("lag_method").value)
-
-        # --- joints ---
-        for r, j in enumerate(self.plot_joints):
-            axp = axs[r][0]
-            axe = axs[r][1]
-
-            axp.plot(self.t, self.ref[j], color="blue", linestyle="-", label="reference", linewidth=1.5)
-            axp.plot(self.t, self.fb[j],  color="green", linestyle="--", label="feedback", linewidth=1.5, alpha=0.7)
-            
-            # ===== planの軌道をプロット =====
-            if self.plan_t and self.plan_pos and j < len(self.plan_pos[0]):
-                plan_joint_pos = [pos[j] for pos in self.plan_pos if j < len(pos)]
-                axp.plot(self.plan_t, plan_joint_pos, 'o', color="orange", 
-                         markersize=3, label="plan", alpha=0.7)
-
-            # ===== 時間シフトされたfeedbackをプロット =====
-            comp_err, lag_sec, fb_shifted = self.compute_compensated_error(self.ref[j], self.fb[j], max_lag_s=self.max_lag_s)
-            axp.plot(self.t, fb_shifted, color="cyan", linestyle=":", label=f"fb_shifted (+{lag_sec:.3f}s)", linewidth=2, alpha=0.8)
-
-            axe.plot(self.t, self.err[j], color="red", linestyle="-", label="error", linewidth=1.5)
-            axe.plot(self.t, comp_err, color="purple", linestyle="--",
-                     label=f"compensated ({lag_method})", linewidth=1.5)
-
-            # 最大誤差を計算して表示
-            max_err = max_abs(self.err[j])
-            max_comp_err = max_abs(comp_err)
-            joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
-            
-            axp.set_ylabel(f"{joint_name} pos")
-            axe.set_ylabel(f"{joint_name} err")
-            axp.grid(True)
-            axe.grid(True)
-            
-            # 最大誤差をグラフ上部に表示
-            axe.text(0.02, 0.98, f"Max err: {max_err:.6f}\nMax comp-err: {max_comp_err:.6f}\nLag: {lag_sec:.3f}s", 
-                     transform=axe.transAxes, verticalalignment='top',
-                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
-                     fontsize=8)
-
-            if r == 0:
-                axp.legend(loc="upper right", fontsize=8)
-                axe.legend(loc="upper right", fontsize=8)
-
-        r0 = n_joint_rows
-
-        # --- end-effector position XYZ ---
-        if add_ee_pos:
-            labels = ["ee_x (m)", "ee_y (m)", "ee_z (m)"]
-            add_ee_plan = (len(self.ee_plan[0]) == len(self.plan_t) and len(self.plan_t) > 0)
-            
-            for i in range(3):
-                r = r0 + i
-                axp = axs[r][0]
-                axe = axs[r][1]
-
-                axp.plot(self.t, self.ee_ref[i], color="blue", linestyle="-", label="ee_reference", linewidth=1.5)
-                axp.plot(self.t, self.ee_fb[i],  color="green", linestyle="--", label="ee_feedback", linewidth=1.5, alpha=0.7)
-                
-                # ===== planのEE軌道をプロット =====
-                if add_ee_plan:
-                    axp.plot(self.plan_t, self.ee_plan[i], 'o', color="orange", 
-                             markersize=3, label="ee_plan", alpha=0.7)
-                
-                # ===== 時間シフトされたEE feedbackをプロット =====
-                comp_err, lag_sec, ee_fb_shifted = self.compute_compensated_error(self.ee_ref[i], self.ee_fb[i], max_lag_s=self.max_lag_s)
-                axp.plot(self.t, ee_fb_shifted, color="cyan", linestyle=":", label=f"ee_fb_shifted (+{lag_sec:.3f}s)", linewidth=2, alpha=0.8)
-                
-                axe.plot(self.t, self.ee_err[i], color="red", linestyle="-", label="ee_error", linewidth=1.5)
-                axe.plot(self.t, comp_err, color="purple", linestyle="--",
-                         label=f"ee_compensated", linewidth=1.5)
-
-                # 最大誤差を計算して表示
-                max_ee_err = max_abs(self.ee_err[i])
-                max_ee_comp_err = max_abs(comp_err)
-
-                axp.set_ylabel(labels[i])
-                axe.set_ylabel(labels[i].replace("(m)", "err (m)"))
-                axp.grid(True)
-                axe.grid(True)
-                
-                # 最大誤差をグラフ上部に表示
-                axe.text(0.02, 0.98, f"Max err: {max_ee_err:.6f} m\nMax comp-err: {max_ee_comp_err:.6f} m\nLag: {lag_sec:.3f}s", 
-                         transform=axe.transAxes, verticalalignment='top',
-                         bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5),
-                         fontsize=8)
-
-                if r == r0:  # 最初のEEプロットのみlegendを表示
-                    axp.legend(loc="upper right", fontsize=8)
-                    axe.legend(loc="upper right", fontsize=8)
-
-            r0 += 3
-
-        # --- end-effector 3D distance error ---
-        if add_ee_dist:
-            r = r0
-            axp = axs[r][0]
-            axe = axs[r][1]
-
-            # 左側：3D距離誤差のグラフ
-            axe.plot(self.t, self.ee_dist_err, color="red", linestyle="-", label="3D distance error", linewidth=1.5)
-            
-            max_dist_err = max_abs(self.ee_dist_err)
-            
-            axe.set_ylabel("ee 3D dist err (m)")
-            axe.grid(True)
-            axe.text(0.02, 0.98, f"Max 3D err: {max_dist_err:.6f} m", 
-                     transform=axe.transAxes, verticalalignment='top',
-                     bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.5),
-                     fontsize=8)
-            axe.legend(loc="upper right", fontsize=8)
-            
-            # 右側：空欄（または統計情報など）
-            axp.axis('off')  # 右側は非表示
-
-        axs[-1][0].set_xlabel("time (s)")
-        axs[-1][1].set_xlabel("time (s)")
-
-        title = f"{self.topic} ({self.field_label or 'unknown'}) samples={len(self.t)} max_lag_s={self.max_lag_s} method={lag_method}"
-        fig.suptitle(title)
-        fig.tight_layout()
-        return fig
-
     def save_csv(self, path: str):
         add_ee_pos = (len(self.ee_ref[0]) == len(self.t) and len(self.t) > 0)
         add_ee_rpy = (len(self.ee_rpy_ref[0]) == len(self.t) and len(self.t) > 0)
-        add_ee_quat = (len(self.ee_quat_ref[0]) == len(self.t) and len(self.t) > 0)
+        add_ee_quat = (len(self.ee_rpy_ref[0]) == len(self.t) and len(self.t) > 0)
 
         with open(path, "w", encoding="utf-8") as f:
             header = ["t"]
@@ -1277,8 +788,62 @@ class TrajFollowRecordActionServer(Node):
         if len(self.t) == 0:
             return False, "No samples recorded; nothing saved."
 
-        fig = self.make_final_plot()
-        fig.savefig(self.out_png, dpi=150)
+        # ===== 共通モジュールを使ってプロット作成 =====
+        # データを辞書形式に変換
+        data = {
+            't': self.t,
+            'dt_est': self.dt_est,
+            'joints': {},
+            'ee': {},
+            'ee_dist_err': self.ee_dist_err
+        }
+        
+        for j in self.plot_joints:
+            joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
+            data['joints'][joint_name] = {
+                'ref': self.ref[j],
+                'fb': self.fb[j],
+                'err': self.err[j],
+                'vel': self.vel[j]
+            }
+        
+        if len(self.ee_ref[0]) > 0:
+            data['ee']['pos'] = {
+                'ref': self.ee_ref,
+                'fb': self.ee_fb,
+                'err': self.ee_err
+            }
+        
+        # Planデータ
+        plan_data = None
+        if self.plan_t and self.plan_pos:
+            plan_data = {
+                't': self.plan_t,
+                'joints': {},
+                'ee': self.ee_plan if len(self.ee_plan[0]) > 0 else None
+            }
+            
+            for j in self.plot_joints:
+                joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
+                if self.plan_pos and j < len(self.plan_pos[0]):
+                    plan_data['joints'][joint_name] = [pos[j] for pos in self.plan_pos if j < len(pos)]
+        
+        # 共通モジュールを使ってプロット作成
+        from .trajectory_analyzer import create_plot
+        try:
+            create_plot(
+                data=data,
+                plan_data=plan_data,
+                analyzer=self.analyzer,
+                output_path=self.out_png,
+                topic=self.topic,
+                field_label=self.field_label or "unknown"
+            )
+        except Exception as e:
+            self.get_logger().error(f"Failed to create plot: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+        
         self.save_csv(self.out_csv)
         self.save_plan_csv(self.out_plan_csv)
 
