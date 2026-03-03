@@ -403,7 +403,7 @@ class TrajFollowRecordActionServer(Node):
             "time_scaling": float(goal_msg.time_scaling),
             "velocity_scaling": float(goal_msg.velocity_scaling),
             "acceleration_scaling": float(goal_msg.acceleration_scaling),
-            "plan": self._to_plain([message_to_ordereddict(rt) for rt in goal_msg.plan]),
+            "plan": self._to_plain(message_to_ordereddict(goal_msg.plan)),
         }
         with open(self.out_plan, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
@@ -412,31 +412,29 @@ class TrajFollowRecordActionServer(Node):
         # ===== planから軌道データを抽出 =====
         self._extract_plan_trajectory(goal_msg.plan)
 
-    def _extract_plan_trajectory(self, plan_trajectories):
+    def _extract_plan_trajectory(self, plan_trajectory):
         """planからtime_from_startと関節位置を抽出"""
         self.plan_t = []
         self.plan_pos = []
         self.plan_joint_names = []  # Plan軌道の関節名を保存
         
         try:
-            for robot_traj in plan_trajectories:
-                # RobotTrajectory内のjoint_trajectoryを取得
-                joint_traj = robot_traj.joint_trajectory
+            # RobotTrajectory内のjoint_trajectoryを取得
+            joint_traj = plan_trajectory.joint_trajectory
+            
+            # joint_namesを取得（関節の順序を把握）
+            joint_names = list(joint_traj.joint_names)
+            self.plan_joint_names = joint_names
+            
+            # 各pointから時刻と位置を抽出
+            for point in joint_traj.points:
+                # time_from_startをfloat秒に変換
+                t_sec = point.time_from_start.sec + point.time_from_start.nanosec * 1e-9
+                self.plan_t.append(t_sec)
                 
-                # joint_namesを取得（関節の順序を把握）
-                joint_names = list(joint_traj.joint_names)
-                if not self.plan_joint_names:
-                    self.plan_joint_names = joint_names
-                
-                # 各pointから時刻と位置を抽出
-                for point in joint_traj.points:
-                    # time_from_startをfloat秒に変換
-                    t_sec = point.time_from_start.sec + point.time_from_start.nanosec * 1e-9
-                    self.plan_t.append(t_sec)
-                    
-                    # 位置データを保存（全関節分）
-                    positions = list(point.positions)
-                    self.plan_pos.append(positions)
+                # 位置データを保存（全関節分）
+                positions = list(point.positions)
+                self.plan_pos.append(positions)
             
             if self.plan_t:
                 self.get_logger().info(f"Extracted plan trajectory: {len(self.plan_t)} points")

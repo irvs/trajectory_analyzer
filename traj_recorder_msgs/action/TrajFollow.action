@@ -2,7 +2,7 @@
 float32 time_scaling
 float32 velocity_scaling
 float32 acceleration_scaling
-moveit_msgs/RobotTrajectory[] plan
+moveit_msgs/RobotTrajectory plan
 
 ---
 # Result
