@@ -250,81 +250,49 @@ class VideoPlayerNode(Node):
         self.pub_ref.publish(msg_ref)
         self.pub_fb.publish(msg_fb)
         
-        # 刃先の位置を取得して軌跡に追加（少し待ってからTF取得）
-        # one_shotがないので、コールバック内でキャンセルする方式
-        def delayed_update():
-            self._update_trajectory()
-            # このタイマーは一度だけ実行されるようにキャンセル
-            if hasattr(self, '_trajectory_timer') and self._trajectory_timer is not None:
-                self._trajectory_timer.cancel()
-        
-        if hasattr(self, '_trajectory_timer') and self._trajectory_timer is not None:
-            self._trajectory_timer.cancel()
-        self._trajectory_timer = self.create_timer(0.01, delayed_update)
+        # 刃先の位置をCSVから直接取得して軌跡に追加（TFを使わない）
+        self._update_trajectory_from_csv(row)
         
         self.frame_idx += 1
     
-    def _update_trajectory(self):
-        """刃先のTFを取得して軌跡を更新"""
+    def _update_trajectory_from_csv(self, row):
+        """CSVから直接刃先の位置を取得して軌跡を更新（高速再生でも安定）"""
         try:
-            # まずは名前空間なしで試す（robot_state_publisherの動作による）
-            try:
-                trans_ref = self.tf_buffer.lookup_transform(
-                    'base_link',
-                    'bucket_end_link',
-                    rclpy.time.Time(),
-                    timeout=rclpy.duration.Duration(seconds=0.05)
-                )
-                trans_fb = self.tf_buffer.lookup_transform(
-                    'base_link',
-                    'bucket_end_link',
-                    rclpy.time.Time(),
-                    timeout=rclpy.duration.Duration(seconds=0.05)
-                )
-            except TransformException:
-                # 名前空間付きで試す
-                trans_ref = self.tf_buffer.lookup_transform(
-                    'ref/base_link',
-                    'ref/bucket_end_link',
-                    rclpy.time.Time(),
-                    timeout=rclpy.duration.Duration(seconds=0.05)
-                )
-                trans_fb = self.tf_buffer.lookup_transform(
-                    'fb/base_link',
-                    'fb/bucket_end_link',
-                    rclpy.time.Time(),
-                    timeout=rclpy.duration.Duration(seconds=0.05)
-                )
+            # CSVから刃先の位置を読み取る
+            if 'ee_ref_x' in row and 'ee_ref_y' in row and 'ee_ref_z' in row:
+                pose_ref = PoseStamped()
+                pose_ref.header.stamp = self.get_clock().now().to_msg()
+                pose_ref.header.frame_id = "ref/base_link"
+                pose_ref.pose.position.x = float(row['ee_ref_x'])
+                pose_ref.pose.position.y = float(row['ee_ref_y'])
+                pose_ref.pose.position.z = float(row['ee_ref_z'])
+                pose_ref.pose.orientation.w = 1.0
+                
+                self.path_ref.poses.append(pose_ref)
+                self.path_ref.header.stamp = self.get_clock().now().to_msg()
+                self.pub_path_ref.publish(self.path_ref)
             
-            pose_ref = PoseStamped()
-            pose_ref.header.stamp = self.get_clock().now().to_msg()
-            pose_ref.header.frame_id = "ref/base_link"
-            pose_ref.pose.position.x = trans_ref.transform.translation.x
-            pose_ref.pose.position.y = trans_ref.transform.translation.y
-            pose_ref.pose.position.z = trans_ref.transform.translation.z
-            pose_ref.pose.orientation = trans_ref.transform.rotation
-            
-            self.path_ref.poses.append(pose_ref)
-            self.path_ref.header.stamp = self.get_clock().now().to_msg()
-            
-            pose_fb = PoseStamped()
-            pose_fb.header.stamp = self.get_clock().now().to_msg()
-            pose_fb.header.frame_id = "fb/base_link"
-            pose_fb.pose.position.x = trans_fb.transform.translation.x
-            pose_fb.pose.position.y = trans_fb.transform.translation.y
-            pose_fb.pose.position.z = trans_fb.transform.translation.z
-            pose_fb.pose.orientation = trans_fb.transform.rotation
-            
-            self.path_fb.poses.append(pose_fb)
-            self.path_fb.header.stamp = self.get_clock().now().to_msg()
-            
-            # 軌跡を配信
-            self.pub_path_ref.publish(self.path_ref)
-            self.pub_path_fb.publish(self.path_fb)
-            
-        except TransformException as ex:
-            # 初回はTFがまだ準備できていない可能性があるので無視
+            if 'ee_fb_x' in row and 'ee_fb_y' in row and 'ee_fb_z' in row:
+                pose_fb = PoseStamped()
+                pose_fb.header.stamp = self.get_clock().now().to_msg()
+                pose_fb.header.frame_id = "fb/base_link"
+                pose_fb.pose.position.x = float(row['ee_fb_x'])
+                pose_fb.pose.position.y = float(row['ee_fb_y'])
+                pose_fb.pose.position.z = float(row['ee_fb_z'])
+                pose_fb.pose.orientation.w = 1.0
+                
+                self.path_fb.poses.append(pose_fb)
+                self.path_fb.header.stamp = self.get_clock().now().to_msg()
+                self.pub_path_fb.publish(self.path_fb)
+                
+        except (KeyError, ValueError) as e:
+            # CSVにEE位置データがない場合は無視（古いデータとの互換性）
             pass
+    
+    def _update_trajectory(self):
+        """刃先のTFを取得して軌跡を更新（廃止：CSVから直接読み取る方式に変更）"""
+        # この関数は互換性のために残すが、使用されない
+        pass
     
     def _start_playback(self):
         """遅延後に再生を開始"""

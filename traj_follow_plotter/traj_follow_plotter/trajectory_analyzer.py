@@ -448,21 +448,64 @@ def create_plot(data: Dict,
     # --- EE 3D距離誤差 ---
     if add_ee_dist:
         r = r0
+        axp = axs[r][0]
         axe = axs[r][1]
         
+        # 元の3D距離誤差
         axe.plot(t, data['ee_dist_err'], color="red", linestyle="-", label="3D distance error", linewidth=1.5)
         
         max_dist_err = max_abs(data['ee_dist_err'])
         
+        # 遅れ補正後の3D距離誤差を計算
+        compensated_3d_err = []
+        if add_ee_pos:
+            # 各軸の補正後のfeedbackから3D距離誤差を計算
+            ee_fb_shifted = [[], [], []]  # x, y, z
+            lag_sec = 0.0
+            
+            for i in range(3):
+                ee_ref = data['ee']['pos']['ref'][i]
+                ee_fb = data['ee']['pos']['fb'][i]
+                _, lag_sec, fb_shifted = analyzer.compute_compensated_error(t, ee_ref, ee_fb, dt_est)
+                ee_fb_shifted[i] = fb_shifted
+            
+            # 補正後の3D距離誤差を計算
+            for idx in range(len(t)):
+                try:
+                    ex = data['ee']['pos']['ref'][0][idx] - ee_fb_shifted[0][idx]
+                    ey = data['ee']['pos']['ref'][1][idx] - ee_fb_shifted[1][idx]
+                    ez = data['ee']['pos']['ref'][2][idx] - ee_fb_shifted[2][idx]
+                    
+                    if math.isnan(ex) or math.isnan(ey) or math.isnan(ez):
+                        compensated_3d_err.append(math.nan)
+                    else:
+                        dist = math.sqrt(ex**2 + ey**2 + ez**2)
+                        compensated_3d_err.append(dist)
+                except (IndexError, TypeError):
+                    compensated_3d_err.append(math.nan)
+            
+            # 補正後の3D距離誤差をプロット
+            axe.plot(t, compensated_3d_err, color="purple", linestyle="--", 
+                     label=f"compensated 3D error", linewidth=1.5)
+            
+            max_comp_3d_err = max_abs(compensated_3d_err)
+            
+            axe.text(0.02, 0.98, 
+                     f"Max 3D err: {max_dist_err:.6f} m\nMax comp 3D err: {max_comp_3d_err:.6f} m\nLag: {lag_sec:.3f}s", 
+                     transform=axe.transAxes, verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.5),
+                     fontsize=8)
+        else:
+            axe.text(0.02, 0.98, f"Max 3D err: {max_dist_err:.6f} m", 
+                     transform=axe.transAxes, verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.5),
+                     fontsize=8)
+        
         axe.set_ylabel("ee 3D dist err (m)")
         axe.grid(True)
-        axe.text(0.02, 0.98, f"Max 3D err: {max_dist_err:.6f} m", 
-                 transform=axe.transAxes, verticalalignment='top',
-                 bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.5),
-                 fontsize=8)
         axe.legend(loc="upper right", fontsize=8)
         
-        axs[r][0].axis('off')
+        axp.axis('off')
     
     axs[-1][0].set_xlabel("time (s)")
     axs[-1][1].set_xlabel("time (s)")

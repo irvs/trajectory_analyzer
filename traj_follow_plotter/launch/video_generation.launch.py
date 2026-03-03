@@ -2,11 +2,20 @@
 動画生成用launchファイル - 1つで全て完結
 
 使い方:
-  # 仮想ディスプレイで録画（デフォルト）
+  # 仮想ディスプレイで録画（デフォルト、等速再生）
   ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS
 
-  # 通常ディスプレイで表示
+  # 2倍速で録画
+  ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS playback_speed:=2.0
+
+  # 0.5倍速（スロー再生）で録画
+  ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS playback_speed:=0.5
+
+  # 通常ディスプレイで表示（等速）
   ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS use_xvfb:=false
+
+  # 通常ディスプレイで2倍速表示
+  ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS use_xvfb:=false playback_speed:=2.0
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction, RegisterEventHandler, EmitEvent, OpaqueFunction
@@ -23,6 +32,7 @@ def generate_nodes(context, *args, **kwargs):
     """条件に応じてノードを生成"""
     data_dir = LaunchConfiguration('data_dir').perform(context)
     use_xvfb = LaunchConfiguration('use_xvfb').perform(context)
+    playback_speed = float(LaunchConfiguration('playback_speed').perform(context))
     
     # use_xvfbがtrueならXvfbを使用、falseなら現在のDISPLAYを使用
     display = ':99' if use_xvfb.lower() == 'true' else os.environ.get('DISPLAY', ':0')
@@ -106,7 +116,7 @@ def generate_nodes(context, *args, **kwargs):
         output='screen',
         parameters=[{
             'csv_path': csv_file,
-            'playback_speed': 1.0,
+            'playback_speed': playback_speed,
             'loop': False if use_xvfb.lower() == 'true' else True  # 通常ディスプレイではループ再生
         }],
         additional_env={'DISPLAY': display}
@@ -194,8 +204,15 @@ def generate_launch_description():
         description='Use Xvfb (virtual display) for recording. Set to false to use current display.'
     )
     
+    playback_speed_arg = DeclareLaunchArgument(
+        'playback_speed',
+        default_value='1.0',
+        description='Playback speed multiplier (e.g., 1.0=normal, 2.0=2x speed, 0.5=half speed)'
+    )
+    
     return LaunchDescription([
         data_dir_arg,
         use_xvfb_arg,
+        playback_speed_arg,
         OpaqueFunction(function=generate_nodes)
     ])
