@@ -29,12 +29,17 @@ class VideoPlayerNode(Node):
         self.declare_parameter("loop", False)
         self.declare_parameter("start_delay", 0.0)  # 再生開始の遅延時間
         self.declare_parameter("use_compensated", False)  # 補正済みデータを使用するか
+        self.declare_parameter("robot_namespace", "")  # ★新規追加：namespace対応
         
         csv_path = str(self.get_parameter("csv_path").value)
         playback_speed = float(self.get_parameter("playback_speed").value)
         self.loop = bool(self.get_parameter("loop").value)
         start_delay = float(self.get_parameter("start_delay").value)
         use_compensated = bool(self.get_parameter("use_compensated").value)
+        robot_namespace = str(self.get_parameter("robot_namespace").value)
+        
+        # namespace用のプレフィックス（空の場合は空文字列、あればスラッシュ付き）
+        self.ns_prefix = f"{robot_namespace}/" if robot_namespace else ""
         
         # 補正済みCSVが存在する場合はそちらを使用
         if use_compensated:
@@ -59,10 +64,11 @@ class VideoPlayerNode(Node):
             "bucket_end_joint"
         ]
         
-        # プレフィックス付きの関節名
-        self.joint_names_ref = [f"ref/{name}" for name in self.joint_names]
-        self.joint_names_fb = [f"fb/{name}" for name in self.joint_names]
-        self.joint_names_fb_comp = [f"fb_comp/{name}" for name in self.joint_names]  # ★新規追加
+        # プレフィックス付きの関節名（namespace対応）
+        # 例: robot_namespace="robot1" の場合 → "robot1/ref/swing_joint"
+        self.joint_names_ref = [f"{self.ns_prefix}ref/{name}" for name in self.joint_names]
+        self.joint_names_fb = [f"{self.ns_prefix}fb/{name}" for name in self.joint_names]
+        self.joint_names_fb_comp = [f"{self.ns_prefix}fb_comp/{name}" for name in self.joint_names]
         
         # Publishers（絶対パスで指定）
         self.pub_ref = self.create_publisher(JointState, "/video_gen/joint_states_ref", 10)
@@ -80,13 +86,13 @@ class VideoPlayerNode(Node):
         # 対応点可視化用のマーカーパブリッシャー
         self.pub_comparison_markers = self.create_publisher(MarkerArray, "/video_gen/comparison_markers", 10)
         
-        # 軌跡データ（刃先の位置履歴）
+        # 軌跡データ（刃先の位置履歴、namespace対応）
         self.path_ref = Path()
-        self.path_ref.header.frame_id = "ref/base_link"
+        self.path_ref.header.frame_id = f"{self.ns_prefix}ref/base_link"
         self.path_fb = Path()
-        self.path_fb.header.frame_id = "fb/base_link"
-        self.path_fb_comp = Path()  # ★新規追加
-        self.path_fb_comp.header.frame_id = "fb_comp/base_link"
+        self.path_fb.header.frame_id = f"{self.ns_prefix}fb/base_link"
+        self.path_fb_comp = Path()
+        self.path_fb_comp.header.frame_id = f"{self.ns_prefix}fb_comp/base_link"
         
         # PlanのEE位置データ
         self.plan_ee_positions = []
@@ -168,15 +174,15 @@ class VideoPlayerNode(Node):
             self.get_logger().warn(f"Failed to load plan EE data: {e}")
     
     def _publish_plan_markers(self):
-        """PlanのEE位置をマーカーとして配信"""
+        """PlanのEE位置をマーカーとして配信（namespace対応）"""
         if not self.plan_ee_positions:
             return
         
         marker_array = MarkerArray()
         
-        # 全てのPlanのEE位置を点として表示
+        # 全てのPlanのEE位置を点として表示（namespace対応）
         marker = Marker()
-        marker.header.frame_id = "ref/base_link"
+        marker.header.frame_id = f"{self.ns_prefix}ref/base_link"  # ★namespace対応
         marker.header.stamp = self.get_clock().now().to_msg()
         marker.ns = "plan_ee"
         marker.id = 0
@@ -201,9 +207,9 @@ class VideoPlayerNode(Node):
         
         marker_array.markers.append(marker)
         
-        # LINE_STRIPで軌跡を線として表示
+        # LINE_STRIPで軌跡を線として表示（namespace対応）
         line_marker = Marker()
-        line_marker.header.frame_id = "ref/base_link"
+        line_marker.header.frame_id = f"{self.ns_prefix}ref/base_link"  # ★namespace対応
         line_marker.header.stamp = self.get_clock().now().to_msg()
         line_marker.ns = "plan_ee_line"
         line_marker.id = 1
@@ -335,7 +341,7 @@ class VideoPlayerNode(Node):
             if 'ee_ref_x' in row and 'ee_ref_y' in row and 'ee_ref_z' in row:
                 pose_ref = PoseStamped()
                 pose_ref.header.stamp = self.get_clock().now().to_msg()
-                pose_ref.header.frame_id = "ref/base_link"
+                pose_ref.header.frame_id = f"{self.ns_prefix}ref/base_link"
                 pose_ref.pose.position.x = float(row['ee_ref_x'])
                 pose_ref.pose.position.y = float(row['ee_ref_y'])
                 pose_ref.pose.position.z = float(row['ee_ref_z'])
@@ -351,7 +357,7 @@ class VideoPlayerNode(Node):
             if 'ee_fb_x' in row and 'ee_fb_y' in row and 'ee_fb_z' in row:
                 pose_fb = PoseStamped()
                 pose_fb.header.stamp = self.get_clock().now().to_msg()
-                pose_fb.header.frame_id = "fb/base_link"
+                pose_fb.header.frame_id = f"{self.ns_prefix}fb/base_link"
                 pose_fb.pose.position.x = float(row['ee_fb_x'])
                 pose_fb.pose.position.y = float(row['ee_fb_y'])
                 pose_fb.pose.position.z = float(row['ee_fb_z'])
@@ -367,7 +373,7 @@ class VideoPlayerNode(Node):
             if self.has_compensated_data and 'ee_fb_compensated_x' in row and 'ee_fb_compensated_y' in row and 'ee_fb_compensated_z' in row:
                 pose_fb_comp = PoseStamped()
                 pose_fb_comp.header.stamp = self.get_clock().now().to_msg()
-                pose_fb_comp.header.frame_id = "fb_comp/base_link"
+                pose_fb_comp.header.frame_id = f"{self.ns_prefix}fb_comp/base_link"
                 pose_fb_comp.pose.position.x = float(row['ee_fb_compensated_x'])
                 pose_fb_comp.pose.position.y = float(row['ee_fb_compensated_y'])
                 pose_fb_comp.pose.position.z = float(row['ee_fb_compensated_z'])
@@ -518,7 +524,7 @@ class VideoPlayerNode(Node):
             
             marker_array.markers.append(fb_comp_sphere)
         
-        # 誤差テキスト表示
+        # 誤差テキスト表示（refの上に表示）
         import math
         dist_fb = math.sqrt((ref_pos[0] - fb_pos[0])**2 + 
                            (ref_pos[1] - fb_pos[1])**2 + 
@@ -531,9 +537,10 @@ class VideoPlayerNode(Node):
         text_marker.id = 5
         text_marker.type = Marker.TEXT_VIEW_FACING
         text_marker.action = Marker.ADD
-        text_marker.pose.position.x = (ref_pos[0] + fb_pos[0]) / 2
-        text_marker.pose.position.y = (ref_pos[1] + fb_pos[1]) / 2
-        text_marker.pose.position.z = (ref_pos[2] + fb_pos[2]) / 2 + 0.3
+        # refの位置から上方に配置（見やすくする）
+        text_marker.pose.position.x = ref_pos[0]
+        text_marker.pose.position.y = ref_pos[1]
+        text_marker.pose.position.z = ref_pos[2] + 0.5  # refの50cm上
         text_marker.pose.orientation.w = 1.0
         text_marker.scale.z = 0.15
         text_marker.color.r = 1.0

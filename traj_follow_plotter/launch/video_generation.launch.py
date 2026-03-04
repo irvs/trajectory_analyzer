@@ -20,6 +20,11 @@ fb_comp (赤): 補正済みfeedback
 
   # 通常ディスプレイで2倍速表示
   ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS use_xvfb:=false playback_speed:=2.0
+
+  # namespace付きで起動（複数ロボット表示用、別ターミナルで実行）
+  ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run1 robot_namespace:=robot1 use_xvfb:=false
+  # 別ターミナルで
+  ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run2 robot_namespace:=robot2 use_xvfb:=false
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction, RegisterEventHandler, EmitEvent, OpaqueFunction
@@ -30,6 +35,44 @@ from launch.substitutions import LaunchConfiguration, Command, PathJoinSubstitut
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 import os
+import tempfile
+
+
+def generate_rviz_config(base_config_path, robot_namespace):
+    """namespace対応のRViz設定ファイルを動的に生成"""
+    with open(base_config_path, 'r') as f:
+        config_content = f.read()
+    
+    if robot_namespace:
+        # TFフレーム名を置換
+        config_content = config_content.replace('ref/base_link', f'{robot_namespace}/ref/base_link')
+        config_content = config_content.replace('fb/base_link', f'{robot_namespace}/fb/base_link')
+        config_content = config_content.replace('fb_comp/base_link', f'{robot_namespace}/fb_comp/base_link')
+        config_content = config_content.replace('ref/bucket_end_link', f'{robot_namespace}/ref/bucket_end_link')
+        config_content = config_content.replace('fb/bucket_end_link', f'{robot_namespace}/fb/bucket_end_link')
+        config_content = config_content.replace('fb_comp/bucket_end_link', f'{robot_namespace}/fb_comp/bucket_end_link')
+        
+        # robot_descriptionトピック名を置換
+        config_content = config_content.replace('/ref/robot_description', f'/{robot_namespace}/ref/robot_description')
+        config_content = config_content.replace('/fb/robot_description', f'/{robot_namespace}/fb/robot_description')
+        config_content = config_content.replace('/fb_comp/robot_description', f'/{robot_namespace}/fb_comp/robot_description')
+        
+        # その他のトピック名を置換
+        config_content = config_content.replace('/video_gen/path_ref', f'/video_gen/{robot_namespace}/path_ref')
+        config_content = config_content.replace('/video_gen/path_fb', f'/video_gen/{robot_namespace}/path_fb')
+        config_content = config_content.replace('/video_gen/path_fb_comp', f'/video_gen/{robot_namespace}/path_fb_comp')
+        config_content = config_content.replace('/video_gen/plan_ee_markers', f'/video_gen/{robot_namespace}/plan_ee_markers')
+        config_content = config_content.replace('/video_gen/comparison_markers', f'/video_gen/{robot_namespace}/comparison_markers')
+        
+        # Gridの参照フレームを最初のロボットに設定
+        config_content = config_content.replace('Reference Frame: ref/base_link', f'Reference Frame: {robot_namespace}/ref/base_link')
+    
+    # 一時ファイルに保存
+    temp_config = tempfile.NamedTemporaryFile(mode='w', suffix='.rviz', delete=False)
+    temp_config.write(config_content)
+    temp_config.close()
+    
+    return temp_config.name
 
 
 def generate_nodes(context, *args, **kwargs):
@@ -38,6 +81,7 @@ def generate_nodes(context, *args, **kwargs):
     use_xvfb = LaunchConfiguration('use_xvfb').perform(context)
     playback_speed = float(LaunchConfiguration('playback_speed').perform(context))
     use_compensated = LaunchConfiguration('use_compensated').perform(context).lower() == 'true'
+    robot_namespace = LaunchConfiguration('robot_namespace').perform(context)
     
     # use_xvfbがtrueならXvfbを使用、falseなら現在のDISPLAYを使用
     display = ':99' if use_xvfb.lower() == 'true' else os.environ.get('DISPLAY', ':0')
@@ -51,7 +95,35 @@ def generate_nodes(context, *args, **kwargs):
     csv_file = os.path.join(data_dir, 'data.csv')
     output_video = os.path.join(data_dir, 'animation.mp4')
     
+    # RViz設定ファイルのパス
+    base_rviz_config = os.path.join(
+        FindPackageShare('traj_follow_plotter').perform(context),
+        'config',
+        'video.rviz'
+    )
+    
     nodes = []
+    
+    # namespace用のプレフィックス（末尾にスラッシュなし、空の場合は空文字列）
+    ns_prefix = robot_namespace if robot_namespace else ""
+    
+    # Xacroに渡すprefix（ref/, fb/, fb_comp/の前にnamespaceを付ける）
+    # 例: robot_namespace="robot1" の場合 → "robot1/ref/", "robot1/fb/", "robot1/fb_comp/"
+    # 例: robot_namespace="" の場合 → "ref/", "fb/", "fb_comp/"
+    if robot_namespace:
+        xacro_prefix_ref = f"{robot_namespace}/ref/"
+        xacro_prefix_fb = f"{robot_namespace}/fb/"
+        xacro_prefix_fb_comp = f"{robot_namespace}/fb_comp/"
+    else:
+        xacro_prefix_ref = "ref/"
+        xacro_prefix_fb = "fb/"
+        xacro_prefix_fb_comp = "fb_comp/"
+    
+    # static TFで使うフレーム名（Xacroが生成するフレーム名と一致させる）
+    # Xacroは prefix + "base_link" を生成するので、"robot1/ref/base_link" のようになる
+    ref_base_link = f"{xacro_prefix_ref}base_link"
+    fb_base_link = f"{xacro_prefix_fb}base_link"
+    fb_comp_base_link = f"{xacro_prefix_fb_comp}base_link"
     
     # 1. Xvfb起動（use_xvfb=trueの場合のみ）
     if use_xvfb.lower() == 'true':
@@ -63,13 +135,17 @@ def generate_nodes(context, *args, **kwargs):
             )
         )
     
-    # 2. Static TF: world → ref/base_link, fb/base_link, fb_comp/base_link
-    # 3台のロボットを同じ位置に配置（重ねて表示）
+    # 2. Static TF: world → {xacro_prefix}base_link
+    # 3台のロボット（ref/fb/fb_comp）は同じ位置に重ねて表示
+    x_offset = 0.0
+    y_offset = 0.0
+    z_offset = 0.0
+    
     static_tf_ref = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='static_tf_ref',
-        arguments=['0', '0', '0', '0', '0', '0', 'world', 'ref/base_link'],
+        name=f'static_tf_ref_{robot_namespace}' if robot_namespace else 'static_tf_ref',
+        arguments=[str(x_offset), str(y_offset), str(z_offset), '0', '0', '0', 'world', ref_base_link],
         output='screen'
     )
     nodes.append(static_tf_ref)
@@ -77,18 +153,17 @@ def generate_nodes(context, *args, **kwargs):
     static_tf_fb = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='static_tf_fb',
-        arguments=['0', '0', '0', '0', '0', '0', 'world', 'fb/base_link'],
+        name=f'static_tf_fb_{robot_namespace}' if robot_namespace else 'static_tf_fb',
+        arguments=[str(x_offset), str(y_offset), str(z_offset), '0', '0', '0', 'world', fb_base_link],
         output='screen'
     )
     nodes.append(static_tf_fb)
     
-    # ★新規追加：補正済みfeedback用
     static_tf_fb_comp = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='static_tf_fb_comp',
-        arguments=['0', '0', '0', '0', '0', '0', 'world', 'fb_comp/base_link'],
+        name=f'static_tf_fb_comp_{robot_namespace}' if robot_namespace else 'static_tf_fb_comp',
+        arguments=[str(x_offset), str(y_offset), str(z_offset), '0', '0', '0', 'world', fb_comp_base_link],
         output='screen'
     )
     nodes.append(static_tf_fb_comp)
@@ -97,13 +172,15 @@ def generate_nodes(context, *args, **kwargs):
     robot_state_publisher_ref = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
-        name='robot_state_publisher',
-        namespace='ref',
+        name='robot_state_publisher_ref',
+        namespace=f'{ns_prefix}/ref' if ns_prefix else 'ref',
         output='screen',
         parameters=[{
-            'robot_description': Command(['xacro ', urdf_file.perform(context), ' prefix:=ref/']),
+            'robot_description': Command(['xacro ', urdf_file.perform(context), f' prefix:={xacro_prefix_ref}']),
         }],
-        remappings=[('joint_states', '/video_gen/joint_states_ref')],
+        remappings=[
+            ('joint_states', f'/video_gen/{ns_prefix}/joint_states_ref' if ns_prefix else '/video_gen/joint_states_ref')
+        ],
         additional_env={'DISPLAY': display}
     )
     nodes.append(robot_state_publisher_ref)
@@ -112,44 +189,59 @@ def generate_nodes(context, *args, **kwargs):
     robot_state_publisher_fb = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
-        name='robot_state_publisher',
-        namespace='fb',
+        name='robot_state_publisher_fb',
+        namespace=f'{ns_prefix}/fb' if ns_prefix else 'fb',
         output='screen',
         parameters=[{
-            'robot_description': Command(['xacro ', urdf_file.perform(context), ' prefix:=fb/']),
+            'robot_description': Command(['xacro ', urdf_file.perform(context), f' prefix:={xacro_prefix_fb}']),
         }],
-        remappings=[('joint_states', '/video_gen/joint_states_fb')],
+        remappings=[
+            ('joint_states', f'/video_gen/{ns_prefix}/joint_states_fb' if ns_prefix else '/video_gen/joint_states_fb')
+        ],
         additional_env={'DISPLAY': display}
     )
     nodes.append(robot_state_publisher_fb)
     
-    # ★新規追加：robot_state_publisher (補正済みFeedback用) - 赤色
+    # 5. robot_state_publisher (補正済みFeedback用) - 赤色
     robot_state_publisher_fb_comp = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
-        name='robot_state_publisher',
-        namespace='fb_comp',
+        name='robot_state_publisher_fb_comp',
+        namespace=f'{ns_prefix}/fb_comp' if ns_prefix else 'fb_comp',
         output='screen',
         parameters=[{
-            'robot_description': Command(['xacro ', urdf_file.perform(context), ' prefix:=fb_comp/']),
+            'robot_description': Command(['xacro ', urdf_file.perform(context), f' prefix:={xacro_prefix_fb_comp}']),
         }],
-        remappings=[('joint_states', '/video_gen/joint_states_fb_comp')],
+        remappings=[
+            ('joint_states', f'/video_gen/{ns_prefix}/joint_states_fb_comp' if ns_prefix else '/video_gen/joint_states_fb_comp')
+        ],
         additional_env={'DISPLAY': display}
     )
     nodes.append(robot_state_publisher_fb_comp)
     
-    # 5. video_player
+    # 6. video_player
     video_player = Node(
         package='traj_follow_plotter',
         executable='video_player',
-        name='video_player_node',
+        name=f'video_player_node_{robot_namespace}' if robot_namespace else 'video_player_node',
         output='screen',
         parameters=[{
             'csv_path': csv_file,
             'playback_speed': playback_speed,
             'use_compensated': use_compensated,
-            'loop': False if use_xvfb.lower() == 'true' else True  # 通常ディスプレイではループ再生
+            'loop': False if use_xvfb.lower() == 'true' else True,
+            'robot_namespace': robot_namespace  # ★追加：namespaceをvideo_playerに渡す
         }],
+        remappings=[
+            ('/video_gen/joint_states_ref', f'/video_gen/{ns_prefix}/joint_states_ref' if ns_prefix else '/video_gen/joint_states_ref'),
+            ('/video_gen/joint_states_fb', f'/video_gen/{ns_prefix}/joint_states_fb' if ns_prefix else '/video_gen/joint_states_fb'),
+            ('/video_gen/joint_states_fb_comp', f'/video_gen/{ns_prefix}/joint_states_fb_comp' if ns_prefix else '/video_gen/joint_states_fb_comp'),
+            ('/video_gen/path_ref', f'/video_gen/{ns_prefix}/path_ref' if ns_prefix else '/video_gen/path_ref'),
+            ('/video_gen/path_fb', f'/video_gen/{ns_prefix}/path_fb' if ns_prefix else '/video_gen/path_fb'),
+            ('/video_gen/path_fb_comp', f'/video_gen/{ns_prefix}/path_fb_comp' if ns_prefix else '/video_gen/path_fb_comp'),
+            ('/video_gen/plan_ee_markers', f'/video_gen/{ns_prefix}/plan_ee_markers' if ns_prefix else '/video_gen/plan_ee_markers'),
+            ('/video_gen/comparison_markers', f'/video_gen/{ns_prefix}/comparison_markers' if ns_prefix else '/video_gen/comparison_markers'),
+        ],
         additional_env={'DISPLAY': display}
     )
     
@@ -159,27 +251,25 @@ def generate_nodes(context, *args, **kwargs):
     )
     nodes.append(video_player_delayed)
     
-    # 6. RViz（3秒後に起動）
+    # 7. RViz（3秒後に起動、namespace対応のRViz設定を動的生成）
+    rviz_config_path = generate_rviz_config(base_rviz_config, robot_namespace)
+    
     rviz = TimerAction(
         period=3.0,
         actions=[
             Node(
                 package='rviz2',
                 executable='rviz2',
-                name='rviz2',
+                name=f'rviz2_{robot_namespace}' if robot_namespace else 'rviz2',
                 output='screen',
-                arguments=['-d', os.path.join(
-                    FindPackageShare('traj_follow_plotter').perform(context),
-                    'config',
-                    'video.rviz'
-                )],
+                arguments=['-d', rviz_config_path],
                 additional_env={'DISPLAY': display}
             )
         ]
     )
     nodes.append(rviz)
     
-    # 7. ffmpeg（3秒後に録画開始、use_xvfb=trueの場合のみ）
+    # 8. ffmpeg（3秒後に録画開始、use_xvfb=trueの場合のみ）
     if use_xvfb.lower() == 'true':
         ffmpeg = TimerAction(
             period=3.0,
@@ -204,7 +294,7 @@ def generate_nodes(context, *args, **kwargs):
         )
         nodes.append(ffmpeg)
     
-    # 8. video_playerが終了したら3秒待ってシャットダウン（use_xvfb=trueの場合のみ）
+    # 9. video_playerが終了したら3秒待ってシャットダウン（use_xvfb=trueの場合のみ）
     if use_xvfb.lower() == 'true':
         shutdown_handler = RegisterEventHandler(
             OnProcessExit(
@@ -247,10 +337,17 @@ def generate_launch_description():
         description='Use compensated feedback data (data_compensated.csv) if available'
     )
     
+    robot_namespace_arg = DeclareLaunchArgument(
+        'robot_namespace',
+        default_value='',
+        description='Namespace for the robot (e.g., robot1, robot2). Leave empty for no namespace.'
+    )
+    
     return LaunchDescription([
         data_dir_arg,
         use_xvfb_arg,
         playback_speed_arg,
         use_compensated_arg,
+        robot_namespace_arg,
         OpaqueFunction(function=generate_nodes)
     ])
