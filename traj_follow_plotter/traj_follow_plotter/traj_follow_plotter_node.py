@@ -163,6 +163,7 @@ class TrajFollowRecordActionServer(Node):
 
         # bag用
         self._bag_proc: Optional[subprocess.Popen] = None
+        self._bag_log = None  # ★追加：ログファイルハンドル
         self._record_bag_all = bool(self.get_parameter("record_bag_all").value)
 
         # matplotlibは最後だけ描画
@@ -850,6 +851,14 @@ class TrajFollowRecordActionServer(Node):
                 pass
         finally:
             self._bag_proc = None
+            
+            # ★ログファイルを確実に閉じる
+            if self._bag_log is not None:
+                try:
+                    self._bag_log.close()
+                except Exception:
+                    pass
+                self._bag_log = None
 
 
 def main():
