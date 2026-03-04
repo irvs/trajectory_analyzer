@@ -20,22 +20,29 @@ Visualization Manager:
       Reference Frame: ref/base_link
     - Alpha: 0.6
       Class: rviz_default_plugins/RobotModel
-      Name: Reference
+      Name: Reference (Blue)
       Description Topic:
         Value: /ref/robot_description
       Enabled: true
       Visual Enabled: true
     - Alpha: 1.0
       Class: rviz_default_plugins/RobotModel
-      Name: Feedback
+      Name: Feedback (Green)
       Description Topic:
         Value: /fb/robot_description
       Enabled: true
       Visual Enabled: true
     - Alpha: 1.0
+      Class: rviz_default_plugins/RobotModel
+      Name: Compensated (Red)
+      Description Topic:
+        Value: /fb_comp/robot_description
+      Enabled: true
+      Visual Enabled: true
+    - Alpha: 1.0
       Buffer Length: 1
       Class: rviz_default_plugins/Path
-      Color: 0; 255; 0
+      Color: 0; 0; 255
       Enabled: true
       Line Style: Lines
       Line Width: 0.05
@@ -56,7 +63,7 @@ Visualization Manager:
     - Alpha: 1.0
       Buffer Length: 1
       Class: rviz_default_plugins/Path
-      Color: 255; 0; 0
+      Color: 0; 255; 0
       Enabled: true
       Line Style: Lines
       Line Width: 0.05
@@ -74,6 +81,27 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /video_gen/path_fb
+    - Alpha: 1.0
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 255; 0; 0
+      Enabled: true
+      Line Style: Lines
+      Line Width: 0.05
+      Name: Path Compensated
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Radius: 0.03
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /video_gen/path_fb_comp
     - Alpha: 1.0
       Class: rviz_default_plugins/MarkerArray
       Enabled: true
@@ -98,9 +126,11 @@ Visualization Manager:
       Enabled: true
       Name: Comparison Markers
       Namespaces:
-        comparison_line: true
+        comparison_line_fb: true
+        comparison_line_comp: true
         comparison_ref: true
         comparison_fb: true
+        comparison_fb_comp: true
         comparison_text: true
       Topic:
         Depth: 5
@@ -127,6 +157,10 @@ Visualization Manager:
         fb/base_link:
           Value: true
         fb/bucket_end_link:
+          Value: true
+        fb_comp/base_link:
+          Value: true
+        fb_comp/bucket_end_link:
           Value: true
         world:
           Value: true

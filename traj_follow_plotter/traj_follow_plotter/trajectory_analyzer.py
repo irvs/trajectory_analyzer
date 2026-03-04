@@ -14,6 +14,15 @@ from scipy.optimize import minimize_scalar
 import matplotlib.pyplot as plt
 import yaml
 
+# FK計算用（PyKDL）
+try:
+    import kdl_parser.urdf as kdl_urdf
+    import PyKDL
+    HAS_KDL = True
+except ImportError:
+    HAS_KDL = False
+    print("Warning: PyKDL or kdl_parser not available. FK-based analysis disabled.")
+
 
 def max_abs(xs: List[float]) -> float:
     """リストの最大絶対値を返す"""
@@ -55,6 +64,106 @@ def quat_to_rpy(x: float, y: float, z: float, w: float) -> Tuple[float, float, f
     yaw = math.atan2(siny_cosp, cosy_cosp)
 
     return roll, pitch, yaw
+
+
+# ===== FK Solver クラス =====
+
+class FKSolver:
+    """
+    Forward Kinematics ソルバー（URDF から動的に構築）
+    リアルタイム処理と後処理の両方で使用可能
+    """
+    
+    def __init__(self, urdf_path: str, base_link: str = "base_link", tip_link: str = "bucket_end_link"):
+        """
+        Args:
+            urdf_path: URDFファイルのパス
+            base_link: ベースリンク名
+            tip_link: 先端リンク名
+        """
+        self.ready = False
+        self.urdf_path = urdf_path
+        self.base_link = base_link
+        self.tip_link = tip_link
+        self._fk_solver = None
+        self._chain = None
+        self._chain_joint_names = []
+        
+        if not HAS_KDL:
+            print("FKSolver: PyKDL not available")
+            return
+        
+        if not urdf_path or not os.path.exists(urdf_path):
+            print(f"FKSolver: URDF not found: {urdf_path}")
+            return
+        
+        try:
+            ok, tree = kdl_urdf.treeFromFile(urdf_path)
+            if not ok:
+                print("FKSolver: Failed to parse URDF")
+                return
+            
+            chain = tree.getChain(base_link, tip_link)
+            if chain.getNrOfSegments() == 0:
+                print(f"FKSolver: Empty chain from {base_link} to {tip_link}")
+                return
+            
+            self._chain = chain
+            self._fk_solver = PyKDL.ChainFkSolverPos_recursive(chain)
+            
+            # チェーンの関節名を抽出
+            joint_names = []
+            for i in range(chain.getNrOfSegments()):
+                seg = chain.getSegment(i)
+                jnt = seg.getJoint()
+                name = jnt.getName()
+                if name and name != "base_joint":
+                    joint_names.append(name)
+            self._chain_joint_names = joint_names
+            
+            self.ready = True
+            print(f"FKSolver: Ready ({len(self._chain_joint_names)} joints: {', '.join(self._chain_joint_names)})")
+            
+        except Exception as e:
+            print(f"FKSolver: Initialization failed: {e}")
+            self.ready = False
+    
+    def compute(self, joint_positions: Dict[str, float]) -> Optional[Tuple[float, float, float]]:
+        """
+        関節角度からEE位置を計算
+        
+        Args:
+            joint_positions: 関節名 -> 角度[rad] の辞書
+        
+        Returns:
+            (x, y, z) または None（失敗時）
+        """
+        if not self.ready:
+            return None
+        
+        try:
+            nj = len(self._chain_joint_names)
+            q = PyKDL.JntArray(nj)
+            
+            for k, jname in enumerate(self._chain_joint_names):
+                if jname in joint_positions:
+                    q[k] = joint_positions[jname]
+                else:
+                    q[k] = 0.0  # 見つからない場合は0
+            
+            frame = PyKDL.Frame()
+            ret = self._fk_solver.JntToCart(q, frame)
+            
+            if ret >= 0:
+                return (frame.p[0], frame.p[1], frame.p[2])
+            else:
+                return None
+        except Exception:
+            return None
+    
+    def get_joint_names(self) -> List[str]:
+        """チェーンの関節名リストを取得"""
+        return self._chain_joint_names.copy()
 
 
 class TrajectoryAnalyzer:
@@ -611,7 +720,12 @@ def create_plot(data: Dict,
     return output_path
 
 
-def save_compensated_csv(data: Dict, analyzer: TrajectoryAnalyzer, output_path: str) -> str:
+def save_compensated_csv(data: Dict, 
+                         analyzer: TrajectoryAnalyzer, 
+                         output_path: str,
+                         urdf_path: Optional[str] = None,
+                         base_link: str = "base_link",
+                         tip_link: str = "bucket_end_link") -> str:
     """
     補正済みfeedbackを含むCSVを保存
     リアルタイム処理でも後処理でも使用可能
@@ -620,6 +734,9 @@ def save_compensated_csv(data: Dict, analyzer: TrajectoryAnalyzer, output_path: 
         data: load_data_from_csv()で読み込んだデータ
         analyzer: TrajectoryAnalyzer インスタンス
         output_path: 出力CSVパス
+        urdf_path: URDFファイルのパス（Noneの場合はEE位置を補正しない）
+        base_link: FKのベースリンク名
+        tip_link: FKの先端リンク名
     
     Returns:
         保存したCSVのパス
@@ -630,21 +747,62 @@ def save_compensated_csv(data: Dict, analyzer: TrajectoryAnalyzer, output_path: 
     # 補正済みデータを計算
     compensated_data = {}
     
-    # 関節データの補正
+    # 【重要】関節角度の時間シフト補正（これが本質）
     for joint_name, joint_data in data['joints'].items():
         ref = joint_data['ref']
         fb = joint_data['fb']
         _, _, fb_compensated = analyzer.compute_compensated_error(t, ref, fb, dt_est)
         compensated_data[joint_name] = fb_compensated
     
-    # EE位置データの補正
+    # EE位置の補正：補正済み関節角度からFKで計算（時間シフトは不要）
     compensated_data['ee'] = {}
-    if 'pos' in data['ee'] and len(data['ee']['pos']['ref'][0]) > 0:
-        for i, axis in enumerate(['x', 'y', 'z']):
-            ee_ref = data['ee']['pos']['ref'][i]
-            ee_fb = data['ee']['pos']['fb'][i]
-            _, _, ee_fb_compensated = analyzer.compute_compensated_error(t, ee_ref, ee_fb, dt_est)
-            compensated_data['ee'][axis] = ee_fb_compensated
+    
+    if urdf_path and HAS_KDL:
+        fk_solver = FKSolver(urdf_path, base_link, tip_link)
+        
+        if fk_solver.ready and 'pos' in data['ee'] and len(data['ee']['pos']['ref'][0]) > 0:
+            print(f"Computing compensated EE positions using FK from compensated joint angles...")
+            
+            # 各時刻で補正済み関節角度からEE位置を計算
+            ee_x_comp = []
+            ee_y_comp = []
+            ee_z_comp = []
+            
+            for i in range(len(t)):
+                # 補正済み関節角度を辞書にまとめる
+                joint_positions = {}
+                for joint_name in compensated_data.keys():
+                    if joint_name != 'ee':
+                        joint_positions[joint_name] = compensated_data[joint_name][i]
+                
+                # FKでEE位置を計算
+                ee_pos = fk_solver.compute(joint_positions)
+                
+                if ee_pos is not None:
+                    ee_x_comp.append(ee_pos[0])
+                    ee_y_comp.append(ee_pos[1])
+                    ee_z_comp.append(ee_pos[2])
+                else:
+                    ee_x_comp.append(math.nan)
+                    ee_y_comp.append(math.nan)
+                    ee_z_comp.append(math.nan)
+            
+            compensated_data['ee']['x'] = ee_x_comp
+            compensated_data['ee']['y'] = ee_y_comp
+            compensated_data['ee']['z'] = ee_z_comp
+            
+            print(f"✓ Compensated EE positions computed using FK")
+        else:
+            if not fk_solver.ready:
+                print(f"Warning: FK solver not ready, EE positions will not be compensated")
+            # URDFがあってもFKが使えない場合はEE位置を補正しない
+            # （関節角度の補正だけで十分）
+    else:
+        # URDFがない場合はEE位置を補正しない
+        # （関節角度の補正だけで十分）
+        if not urdf_path:
+            print("No URDF provided: EE positions will not be compensated (joint angles only)")
+        pass
     
     # CSVに書き込み
     with open(output_path, 'w', newline='') as f:
@@ -665,9 +823,11 @@ def save_compensated_csv(data: Dict, analyzer: TrajectoryAnalyzer, output_path: 
                 fieldnames.extend([
                     f'ee_ref_{axis}',
                     f'ee_fb_{axis}',
-                    f'ee_fb_compensated_{axis}',
                     f'ee_err_{axis}'
                 ])
+                # 補正済みEE位置があれば追加（FKで計算した場合のみ）
+                if axis in compensated_data['ee']:
+                    fieldnames.append(f'ee_fb_compensated_{axis}')
         
         if data['ee_dist_err']:
             fieldnames.append('ee_dist_err')
@@ -691,8 +851,11 @@ def save_compensated_csv(data: Dict, analyzer: TrajectoryAnalyzer, output_path: 
                 for j, axis in enumerate(['x', 'y', 'z']):
                     row[f'ee_ref_{axis}'] = data['ee']['pos']['ref'][j][i]
                     row[f'ee_fb_{axis}'] = data['ee']['pos']['fb'][j][i]
-                    row[f'ee_fb_compensated_{axis}'] = compensated_data['ee'][axis][i]
                     row[f'ee_err_{axis}'] = data['ee']['pos']['err'][j][i]
+                    
+                    # 補正済みEE位置（FKで計算した場合のみ）
+                    if axis in compensated_data['ee']:
+                        row[f'ee_fb_compensated_{axis}'] = compensated_data['ee'][axis][i]
             
             if data['ee_dist_err']:
                 row['ee_dist_err'] = data['ee_dist_err'][i]

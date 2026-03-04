@@ -21,9 +21,15 @@ def main():
     parser.add_argument('--output', '-o', default='plot_reanalyzed.png', help='Output PNG filename (default: plot_reanalyzed.png)')
     parser.add_argument('--max-lag', type=float, default=5.0, help='Maximum lag in seconds (default: 5.0)')
     parser.add_argument('--lag-method', choices=['correlation', 'dtw', 'frequency', 'polynomial', 'adaptive_kalman', 'progress'], 
-                        default='progress', help='Lag estimation method (default: frequency)')
+                        default='progress', help='Lag estimation method (default: progress)')
     parser.add_argument('--no-save-compensated', action='store_true', 
                         help='Do NOT save compensated feedback data (by default it is saved)')
+    parser.add_argument('--urdf', type=str, default=None,
+                        help='Path to URDF file for FK-based EE position compensation')
+    parser.add_argument('--base-link', type=str, default='base_link',
+                        help='Base link name for FK (default: base_link)')
+    parser.add_argument('--tip-link', type=str, default='bucket_end_link',
+                        help='Tip link name for FK (default: bucket_end_link)')
     
     args = parser.parse_args()
     
@@ -78,7 +84,14 @@ def main():
     if not args.no_save_compensated:
         compensated_csv = os.path.join(args.dir, 'data_compensated.csv')
         try:
-            save_compensated_csv(data, analyzer, compensated_csv)
+            save_compensated_csv(
+                data, 
+                analyzer, 
+                compensated_csv,
+                urdf_path=args.urdf,
+                base_link=args.base_link,
+                tip_link=args.tip_link
+            )
             print(f"✓ Compensated data saved to: {compensated_csv}")
         except Exception as e:
             print(f"Error saving compensated CSV: {e}")

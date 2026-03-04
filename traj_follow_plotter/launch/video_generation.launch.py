@@ -1,5 +1,9 @@
 """
-動画生成用launchファイル - 1つで全て完結
+動画生成用launchファイル - 1つで全て完結（3台のバックホウ表示対応）
+
+ref (青): 目標値
+fb (緑): 元のfeedback
+fb_comp (赤): 補正済みfeedback
 
 使い方:
   # 仮想ディスプレイで録画（デフォルト、等速再生）
@@ -59,8 +63,8 @@ def generate_nodes(context, *args, **kwargs):
             )
         )
     
-    # 2. Static TF: world → ref/base_link と world → fb/base_link
-    # 両方のロボットを同じ位置に配置（重ねて表示）
+    # 2. Static TF: world → ref/base_link, fb/base_link, fb_comp/base_link
+    # 3台のロボットを同じ位置に配置（重ねて表示）
     static_tf_ref = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -79,7 +83,17 @@ def generate_nodes(context, *args, **kwargs):
     )
     nodes.append(static_tf_fb)
     
-    # 3. robot_state_publisher (Reference用) - xacroにprefix引数を渡す
+    # ★新規追加：補正済みfeedback用
+    static_tf_fb_comp = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_fb_comp',
+        arguments=['0', '0', '0', '0', '0', '0', 'world', 'fb_comp/base_link'],
+        output='screen'
+    )
+    nodes.append(static_tf_fb_comp)
+    
+    # 3. robot_state_publisher (Reference用) - 青色
     robot_state_publisher_ref = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
@@ -94,7 +108,7 @@ def generate_nodes(context, *args, **kwargs):
     )
     nodes.append(robot_state_publisher_ref)
     
-    # 4. robot_state_publisher (Feedback用) - xacroにprefix引数を渡す
+    # 4. robot_state_publisher (Feedback用) - 緑色
     robot_state_publisher_fb = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
@@ -108,6 +122,21 @@ def generate_nodes(context, *args, **kwargs):
         additional_env={'DISPLAY': display}
     )
     nodes.append(robot_state_publisher_fb)
+    
+    # ★新規追加：robot_state_publisher (補正済みFeedback用) - 赤色
+    robot_state_publisher_fb_comp = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        name='robot_state_publisher',
+        namespace='fb_comp',
+        output='screen',
+        parameters=[{
+            'robot_description': Command(['xacro ', urdf_file.perform(context), ' prefix:=fb_comp/']),
+        }],
+        remappings=[('joint_states', '/video_gen/joint_states_fb_comp')],
+        additional_env={'DISPLAY': display}
+    )
+    nodes.append(robot_state_publisher_fb_comp)
     
     # 5. video_player
     video_player = Node(
