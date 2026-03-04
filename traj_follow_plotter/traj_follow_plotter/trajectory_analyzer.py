@@ -67,7 +67,7 @@ class TrajectoryAnalyzer:
         """
         Args:
             max_lag_s: 最大遅れ時間[秒]
-            lag_method: 遅れ推定手法 ("correlation", "dtw", "gradient", "adaptive_kalman", "frequency", "polynomial")
+            lag_method: 遅れ推定手法 ("correlation", "dtw", "gradient", "adaptive_kalman", "frequency", "polynomial", "progress")
             phase_use_velocity: 位相推定に速度を使うか
         """
         self.max_lag_s = max_lag_s
@@ -182,6 +182,72 @@ class TrajectoryAnalyzer:
         lag_sec = np.average(lags, weights=weights)
         return max(0.0, min(lag_sec, self.max_lag_s))
     
+    def compute_compensated_error_by_progress(self,
+                                               t: List[float],
+                                               ref: List[float],
+                                               fb: List[float]) -> Tuple[List[float], float, List[float]]:
+        """
+        進捗率ベースの遅れ補正済み誤差を計算
+        時間ではなく、軌道全体の進捗（0%〜100%）で対応点を見つける
+        
+        Returns:
+            (compensated_error, lag_sec, fb_resampled)
+        """
+        n = len(t)
+        if len(ref) != n or len(fb) != n or n < 2:
+            return [ref[i] - fb[i] if i < len(ref) and i < len(fb) else math.nan for i in range(n)], 0.0, list(fb)
+        
+        ref_arr = np.array(ref)
+        fb_arr = np.array(fb)
+        t_arr = np.array(t)
+        
+        # 有効なデータのみ抽出
+        valid = np.isfinite(ref_arr) & np.isfinite(fb_arr) & np.isfinite(t_arr)
+        if np.sum(valid) < 2:
+            return [math.nan] * n, 0.0, [math.nan] * n
+        
+        ref_valid = ref_arr[valid]
+        fb_valid = fb_arr[valid]
+        t_valid = t_arr[valid]
+        
+        # 進捗率を計算（0.0〜1.0）
+        t_min = t_valid[0]
+        t_max = t_valid[-1]
+        t_duration = t_max - t_min
+        
+        if t_duration < 1e-6:
+            return [ref[i] - fb[i] for i in range(n)], 0.0, list(fb)
+        
+        progress_valid = (t_valid - t_min) / t_duration
+        
+        # refとfbをそれぞれ進捗率の関数として補間
+        try:
+            ref_interp = interp1d(progress_valid, ref_valid, kind='linear', 
+                                  bounds_error=False, fill_value='extrapolate')
+            fb_interp = interp1d(progress_valid, fb_valid, kind='linear',
+                                 bounds_error=False, fill_value='extrapolate')
+        except Exception:
+            return [ref[i] - fb[i] for i in range(n)], 0.0, list(fb)
+        
+        # 進捗率ベースでfbをリサンプリング（refと同じ進捗率の点）
+        fb_resampled = fb_interp(progress_valid)
+        
+        # 補正後の誤差を計算
+        compensated_err_valid = ref_valid - fb_resampled
+        
+        # 元のサイズに戻す（無効な点はnanのまま）
+        compensated_err = np.full(n, math.nan)
+        fb_resampled_full = np.full(n, math.nan)
+        
+        compensated_err[valid] = compensated_err_valid
+        fb_resampled_full[valid] = fb_resampled
+        
+        # 時間的な遅れを概算（参考値として）
+        # 相関ベースで推定した遅れ時間を返す
+        lag_sec = self.estimate_lag_correlation(ref, fb, np.mean(np.diff(t_valid)) if len(t_valid) > 1 else 0.02)
+        
+        return compensated_err.tolist(), lag_sec, fb_resampled_full.tolist()
+
     def compute_compensated_error(self, 
                                    t: List[float],
                                    ref: List[float], 
@@ -190,9 +256,16 @@ class TrajectoryAnalyzer:
         """
         遅れ補正済み誤差を計算
         
+        lag_methodに応じて時間ベースまたは進捗率ベースを選択
+        
         Returns:
             (compensated_error, lag_sec, fb_shifted)
         """
+        # 進捗率ベース（"progress"）の場合
+        if self.lag_method == "progress":
+            return self.compute_compensated_error_by_progress(t, ref, fb)
+        
+        # 従来の時間シフト方式
         if self.lag_method == "frequency":
             lag_sec = self.estimate_lag_frequency(ref, fb, dt_est)
         else:  # "correlation"
@@ -367,8 +440,17 @@ def create_plot(data: Dict,
         
         # 遅れ補正
         comp_err, lag_sec, fb_shifted = analyzer.compute_compensated_error(t, ref, fb, dt_est)
+        
+        # プロット時のラベルを手法に応じて変更
+        if analyzer.lag_method == "progress":
+            shift_label = "fb_progress_matched"
+            shift_info = "Progress"
+        else:
+            shift_label = f"fb_shifted (+{lag_sec:.3f}s)"
+            shift_info = f"Lag: {lag_sec:.3f}s"
+        
         axp.plot(t, fb_shifted, color="cyan", linestyle=":", 
-                 label=f"fb_shifted (+{lag_sec:.3f}s)", linewidth=2, alpha=0.8)
+                 label=shift_label, linewidth=2, alpha=0.8)
         
         axe.plot(t, err, color="red", linestyle="-", label="error", linewidth=1.5)
         axe.plot(t, comp_err, color="purple", linestyle="--",
@@ -384,7 +466,7 @@ def create_plot(data: Dict,
         axe.grid(True)
         
         axe.text(0.02, 0.98, 
-                 f"Max err: {max_err:.6f}\nMax comp-err: {max_comp_err:.6f}\nLag: {lag_sec:.3f}s", 
+                 f"Max err: {max_err:.6f}\nMax comp-err: {max_comp_err:.6f}\n{shift_info}", 
                  transform=axe.transAxes, verticalalignment='top',
                  bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
                  fontsize=8)
@@ -419,8 +501,17 @@ def create_plot(data: Dict,
             
             # 遅れ補正
             comp_err, lag_sec, ee_fb_shifted = analyzer.compute_compensated_error(t, ee_ref, ee_fb, dt_est)
+            
+            # プロット時のラベルを手法に応じて変更
+            if analyzer.lag_method == "progress":
+                shift_label = "fb_progress_matched"
+                shift_info = "Progress"
+            else:
+                shift_label = f"fb_shifted (+{lag_sec:.3f}s)"
+                shift_info = f"Lag: {lag_sec:.3f}s"
+            
             axp.plot(t, ee_fb_shifted, color="cyan", linestyle=":", 
-                     label=f"ee_fb_shifted (+{lag_sec:.3f}s)", linewidth=2, alpha=0.8)
+                     label=shift_label, linewidth=2, alpha=0.8)
             
             axe.plot(t, ee_err, color="red", linestyle="-", label="ee_error", linewidth=1.5)
             axe.plot(t, comp_err, color="purple", linestyle="--", label=f"ee_compensated", linewidth=1.5)
@@ -434,7 +525,7 @@ def create_plot(data: Dict,
             axe.grid(True)
             
             axe.text(0.02, 0.98, 
-                     f"Max err: {max_ee_err:.6f} m\nMax comp-err: {max_ee_comp_err:.6f} m\nLag: {lag_sec:.3f}s", 
+                     f"Max err: {max_ee_err:.6f} m\nMax comp-err: {max_ee_comp_err:.6f} m\n{shift_info}", 
                      transform=axe.transAxes, verticalalignment='top',
                      bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5),
                      fontsize=8)
@@ -516,5 +607,96 @@ def create_plot(data: Dict,
     
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
+    
+    return output_path
+
+
+def save_compensated_csv(data: Dict, analyzer: TrajectoryAnalyzer, output_path: str) -> str:
+    """
+    補正済みfeedbackを含むCSVを保存
+    リアルタイム処理でも後処理でも使用可能
+    
+    Args:
+        data: load_data_from_csv()で読み込んだデータ
+        analyzer: TrajectoryAnalyzer インスタンス
+        output_path: 出力CSVパス
+    
+    Returns:
+        保存したCSVのパス
+    """
+    t = data['t']
+    dt_est = np.mean(np.diff(t)) if len(t) > 1 else 0.02
+    
+    # 補正済みデータを計算
+    compensated_data = {}
+    
+    # 関節データの補正
+    for joint_name, joint_data in data['joints'].items():
+        ref = joint_data['ref']
+        fb = joint_data['fb']
+        _, _, fb_compensated = analyzer.compute_compensated_error(t, ref, fb, dt_est)
+        compensated_data[joint_name] = fb_compensated
+    
+    # EE位置データの補正
+    compensated_data['ee'] = {}
+    if 'pos' in data['ee'] and len(data['ee']['pos']['ref'][0]) > 0:
+        for i, axis in enumerate(['x', 'y', 'z']):
+            ee_ref = data['ee']['pos']['ref'][i]
+            ee_fb = data['ee']['pos']['fb'][i]
+            _, _, ee_fb_compensated = analyzer.compute_compensated_error(t, ee_ref, ee_fb, dt_est)
+            compensated_data['ee'][axis] = ee_fb_compensated
+    
+    # CSVに書き込み
+    with open(output_path, 'w', newline='') as f:
+        fieldnames = ['t']
+        
+        # 関節フィールド
+        for joint_name in data['joints'].keys():
+            fieldnames.extend([
+                f'{joint_name}_ref',
+                f'{joint_name}_fb',
+                f'{joint_name}_fb_compensated',
+                f'{joint_name}_err'
+            ])
+        
+        # EEフィールド
+        if 'pos' in data['ee']:
+            for axis in ['x', 'y', 'z']:
+                fieldnames.extend([
+                    f'ee_ref_{axis}',
+                    f'ee_fb_{axis}',
+                    f'ee_fb_compensated_{axis}',
+                    f'ee_err_{axis}'
+                ])
+        
+        if data['ee_dist_err']:
+            fieldnames.append('ee_dist_err')
+        
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        
+        for i, time in enumerate(t):
+            row = {'t': time}
+            
+            # 関節データ
+            for joint_name in data['joints'].keys():
+                joint_data = data['joints'][joint_name]
+                row[f'{joint_name}_ref'] = joint_data['ref'][i]
+                row[f'{joint_name}_fb'] = joint_data['fb'][i]
+                row[f'{joint_name}_fb_compensated'] = compensated_data[joint_name][i]
+                row[f'{joint_name}_err'] = joint_data['err'][i]
+            
+            # EE位置データ
+            if 'pos' in data['ee']:
+                for j, axis in enumerate(['x', 'y', 'z']):
+                    row[f'ee_ref_{axis}'] = data['ee']['pos']['ref'][j][i]
+                    row[f'ee_fb_{axis}'] = data['ee']['pos']['fb'][j][i]
+                    row[f'ee_fb_compensated_{axis}'] = compensated_data['ee'][axis][i]
+                    row[f'ee_err_{axis}'] = data['ee']['pos']['err'][j][i]
+            
+            if data['ee_dist_err']:
+                row['ee_dist_err'] = data['ee_dist_err'][i]
+            
+            writer.writerow(row)
     
     return output_path

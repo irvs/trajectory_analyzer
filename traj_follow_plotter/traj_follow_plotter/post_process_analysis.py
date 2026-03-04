@@ -10,7 +10,8 @@ from .trajectory_analyzer import (
     TrajectoryAnalyzer,
     load_data_from_csv,
     load_plan_from_csv,
-    create_plot
+    create_plot,
+    save_compensated_csv
 )
 
 
@@ -19,8 +20,10 @@ def main():
     parser.add_argument('--dir', required=True, help='Directory containing data.csv and plan.csv')
     parser.add_argument('--output', '-o', default='plot_reanalyzed.png', help='Output PNG filename (default: plot_reanalyzed.png)')
     parser.add_argument('--max-lag', type=float, default=5.0, help='Maximum lag in seconds (default: 5.0)')
-    parser.add_argument('--lag-method', choices=['correlation', 'dtw', 'frequency', 'polynomial', 'adaptive_kalman'], 
-                        default='frequency', help='Lag estimation method (default: frequency)')
+    parser.add_argument('--lag-method', choices=['correlation', 'dtw', 'frequency', 'polynomial', 'adaptive_kalman', 'progress'], 
+                        default='progress', help='Lag estimation method (default: frequency)')
+    parser.add_argument('--no-save-compensated', action='store_true', 
+                        help='Do NOT save compensated feedback data (by default it is saved)')
     
     args = parser.parse_args()
     
@@ -70,6 +73,17 @@ def main():
     )
     
     print(f"Analyzing with method: {args.lag_method}, max_lag: {args.max_lag}s")
+    
+    # 補正済みCSVを保存（デフォルトで保存、--no-save-compensatedで無効化）
+    if not args.no_save_compensated:
+        compensated_csv = os.path.join(args.dir, 'data_compensated.csv')
+        try:
+            save_compensated_csv(data, analyzer, compensated_csv)
+            print(f"✓ Compensated data saved to: {compensated_csv}")
+        except Exception as e:
+            print(f"Error saving compensated CSV: {e}")
+            import traceback
+            traceback.print_exc()
     
     # プロット作成
     try:

@@ -829,7 +829,7 @@ class TrajFollowRecordActionServer(Node):
                     plan_data['joints'][joint_name] = [pos[j] for pos in self.plan_pos if j < len(pos)]
         
         # 共通モジュールを使ってプロット作成
-        from .trajectory_analyzer import create_plot
+        from .trajectory_analyzer import create_plot, save_compensated_csv
         try:
             create_plot(
                 data=data,
@@ -846,8 +846,18 @@ class TrajFollowRecordActionServer(Node):
         
         self.save_csv(self.out_csv)
         self.save_plan_csv(self.out_plan_csv)
+        
+        # 補正済みCSVを保存
+        compensated_csv = os.path.join(self.out_dir, 'data_compensated.csv')
+        try:
+            save_compensated_csv(data, self.analyzer, compensated_csv)
+            self.get_logger().info(f"Saved compensated CSV: {compensated_csv}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to save compensated CSV: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
 
-        return True, f"Saved: {self.out_png}, {self.out_csv}, {self.out_plan}, {self.out_plan_csv}, bag={self.bag_dir}"
+        return True, f"Saved: {self.out_png}, {self.out_csv}, {compensated_csv}, {self.out_plan}, {self.out_plan_csv}, bag={self.bag_dir}"
 
     # ---------------------------
     # ros2 bag record -a

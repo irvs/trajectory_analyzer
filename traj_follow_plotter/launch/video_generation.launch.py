@@ -33,6 +33,7 @@ def generate_nodes(context, *args, **kwargs):
     data_dir = LaunchConfiguration('data_dir').perform(context)
     use_xvfb = LaunchConfiguration('use_xvfb').perform(context)
     playback_speed = float(LaunchConfiguration('playback_speed').perform(context))
+    use_compensated = LaunchConfiguration('use_compensated').perform(context).lower() == 'true'
     
     # use_xvfbがtrueならXvfbを使用、falseなら現在のDISPLAYを使用
     display = ':99' if use_xvfb.lower() == 'true' else os.environ.get('DISPLAY', ':0')
@@ -117,6 +118,7 @@ def generate_nodes(context, *args, **kwargs):
         parameters=[{
             'csv_path': csv_file,
             'playback_speed': playback_speed,
+            'use_compensated': use_compensated,
             'loop': False if use_xvfb.lower() == 'true' else True  # 通常ディスプレイではループ再生
         }],
         additional_env={'DISPLAY': display}
@@ -210,9 +212,16 @@ def generate_launch_description():
         description='Playback speed multiplier (e.g., 1.0=normal, 2.0=2x speed, 0.5=half speed)'
     )
     
+    use_compensated_arg = DeclareLaunchArgument(
+        'use_compensated',
+        default_value='true',
+        description='Use compensated feedback data (data_compensated.csv) if available'
+    )
+    
     return LaunchDescription([
         data_dir_arg,
         use_xvfb_arg,
         playback_speed_arg,
+        use_compensated_arg,
         OpaqueFunction(function=generate_nodes)
     ])

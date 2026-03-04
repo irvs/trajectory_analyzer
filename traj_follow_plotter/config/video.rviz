@@ -93,6 +93,27 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /video_gen/plan_ee_markers/update
+    - Alpha: 1.0
+      Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Comparison Markers
+      Namespaces:
+        comparison_line: true
+        comparison_ref: true
+        comparison_fb: true
+        comparison_text: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /video_gen/comparison_markers
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /video_gen/comparison_markers/update
     - Class: rviz_default_plugins/TF
       Name: TF
       Enabled: true
