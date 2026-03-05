@@ -166,27 +166,52 @@ class TrajectoryAnalyzer:
 
 def save_data_csv(data: Dict, csv_path: str, joint_names: List[str]):
     """
-    データをdata.csvに保存
+    データをdata.csvに保存（関節 + EE + ee_dist_err）
     
     Args:
         data: load_data_from_csv()と同じ形式の辞書
         csv_path: 保存先パス
         joint_names: 保存する関節名のリスト
     """
+    # EEが保存可能か（load_data_from_csvが読む形式に合わせる）
+    has_ee = (
+        isinstance(data.get('ee'), dict) and
+        isinstance(data['ee'].get('pos'), dict) and
+        all(k in data['ee']['pos'] for k in ['ref', 'fb', 'err']) and
+        len(data['ee']['pos']['ref']) == 3 and
+        len(data['ee']['pos']['fb']) == 3 and
+        len(data['ee']['pos']['err']) == 3 and
+        len(data['ee']['pos']['ref'][0]) == len(data.get('t', []))
+    )
+    has_ee_dist_err = (isinstance(data.get('ee_dist_err'), list) and
+                       len(data['ee_dist_err']) == len(data.get('t', [])))
+
     with open(csv_path, 'w', newline='') as f:
         writer = csv.writer(f)
-        
+
         # ヘッダー作成
         header = ['t']
         for jn in joint_names:
             header += [f'{jn}_ref', f'{jn}_fb', f'{jn}_err', f'{jn}_vel']
-        
+
+        # ★EE列を追加（load_data_from_csv互換の名前）
+        if has_ee:
+            header += [
+                'ee_ref_x', 'ee_ref_y', 'ee_ref_z',
+                'ee_fb_x',  'ee_fb_y',  'ee_fb_z',
+                'ee_err_x', 'ee_err_y', 'ee_err_z',
+            ]
+
+        # ★距離誤差列
+        if has_ee_dist_err:
+            header += ['ee_dist_err']
+
         writer.writerow(header)
-        
+
         # データ行
         for i, t in enumerate(data['t']):
             row = [f'{t:.9f}']
-            
+
             for jn in joint_names:
                 if jn in data['joints']:
                     joint_data = data['joints'][jn]
@@ -196,7 +221,21 @@ def save_data_csv(data: Dict, csv_path: str, joint_names: List[str]):
                     row.append(joint_data['vel'][i] if i < len(joint_data['vel']) else 0.0)
                 else:
                     row.extend([0.0, 0.0, 0.0, 0.0])
-            
+
+            # ★EE位置を追加
+            if has_ee:
+                # data['ee']['pos'][kind][axis][i]
+                ref = data['ee']['pos']['ref']
+                fb  = data['ee']['pos']['fb']
+                err = data['ee']['pos']['err']
+                row.extend([ref[0][i], ref[1][i], ref[2][i],
+                            fb[0][i],  fb[1][i],  fb[2][i],
+                            err[0][i], err[1][i], err[2][i]])
+
+            # ★距離誤差を追加
+            if has_ee_dist_err:
+                row.append(data['ee_dist_err'][i])
+
             writer.writerow(row)
 
 

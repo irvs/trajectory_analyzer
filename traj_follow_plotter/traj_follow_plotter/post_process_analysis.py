@@ -20,7 +20,10 @@ def get_default_urdf_path():
         return "install/traj_follow_plotter/share/traj_follow_plotter/urdf/zx200.urdf"
 
 
-def extract_data_from_bag(bag_path: str, output_dir: str, urdf_path: str, state_topic: str = None) -> tuple:
+def extract_data_from_bag(bag_path: str, output_dir: str, urdf_path: str,
+                          state_topic: str = None,
+                          base_link: str = "base_link",
+                          tip_link: str = "bucket_end_link") -> tuple:
     """
     rosbagファイルからdata.csvとplan.csvを抽出
     
@@ -117,8 +120,13 @@ def extract_data_from_bag(bag_path: str, output_dir: str, urdf_path: str, state_
     
     # data.csv を生成
     data_csv_path = os.path.join(output_dir, 'data.csv')
-    data_dict = _convert_state_data_to_dict(state_data)
-    
+    data_dict = _convert_state_data_to_dict(
+        state_data,
+        urdf_path=urdf_path,
+        base_link=base_link,
+        tip_link="bucket_end_link"
+    )
+        
     # 関節名リスト（bucket_end_jointを除外）
     joint_names = [jn for jn in data_dict['joints'].keys() if jn != 'bucket_end_joint']
     
@@ -151,11 +159,13 @@ def extract_data_from_bag(bag_path: str, output_dir: str, urdf_path: str, state_
     return data_csv_path, plan_csv_path
 
 
-def _convert_state_data_to_dict(state_data: list) -> dict:
-    """controller_state データを辞書形式に変換（共通モジュール用）"""
-    # 関節名を取得（最初のメッセージから）
+def _convert_state_data_to_dict(state_data: list,
+                                urdf_path: str,
+                                base_link: str = "base_link",
+                                tip_link: str = "bucket_end_link") -> dict:
+    """controller_state データを辞書形式に変換（共通モジュール用、EEも計算）"""
     _, first_msg = state_data[0]
-    
+
     # reference/feedback または desired/actual を判定
     if hasattr(first_msg, 'reference'):
         ref_field = 'reference'
@@ -165,54 +175,124 @@ def _convert_state_data_to_dict(state_data: list) -> dict:
         ref_field = 'desired'
         fb_field = 'actual'
         err_field = 'error'
-    
-    joint_names = list(first_msg.joint_names) if hasattr(first_msg, 'joint_names') else []
-    
-    # bucket_end_joint は除外
-    joint_names = [jn for jn in joint_names if jn != 'bucket_end_joint']
-    
+
+    msg_joint_names = list(first_msg.joint_names) if hasattr(first_msg, 'joint_names') else []
+
+    # bucket_end_joint は除外（あなたの方針どおり）
+    joint_names = [jn for jn in msg_joint_names if jn != 'bucket_end_joint']
+
     # 辞書を初期化
     data = {
         't': [],
         'joints': {}
     }
-    
+
     for jn in joint_names:
-        data['joints'][jn] = {
-            'ref': [],
-            'fb': [],
-            'err': [],
-            'vel': []
+        data['joints'][jn] = {'ref': [], 'fb': [], 'err': [], 'vel': []}
+
+    # ===== FK準備（1回だけ）=====
+    fk_solver = None
+    fk_ready = False
+    chain_joint_names = []
+    name_to_idx = {}
+
+    try:
+        from .trajectory_analyzer import FKSolver
+        fk_solver = FKSolver(urdf_path, base_link, tip_link)
+        fk_ready = bool(fk_solver.ready)
+        if fk_ready:
+            chain_joint_names = fk_solver.get_joint_names()
+
+            # msg.joint_names -> index の辞書を作る
+            name_to_idx = {jn: msg_joint_names.index(jn) for jn in msg_joint_names}
+
+            # チェーン関節が揃っているかチェック
+            missing = [jn for jn in chain_joint_names if jn not in name_to_idx]
+            if missing:
+                print("Warning: FK disabled (missing joint(s) in msg.joint_names): " + ", ".join(missing))
+                fk_ready = False
+    except Exception as e:
+        print(f"Warning: FK init failed, EE will not be computed: {e}")
+        fk_ready = False
+
+    # EE格納先（FKが有効な場合だけ作る。無効でも作ってNaN埋めしたいなら作ってOK）
+    if fk_ready:
+        data['ee'] = {
+            'pos': {
+                'ref': [[], [], []],  # x,y,z
+                'fb':  [[], [], []],
+                'err': [[], [], []],
+            }
         }
-    
+
     # データを格納
     for t_rel, msg in state_data:
         ref_pt = getattr(msg, ref_field)
-        fb_pt = getattr(msg, fb_field)
+        fb_pt  = getattr(msg, fb_field)
         err_pt = getattr(msg, err_field)
-        
+
         ref_pos = list(ref_pt.positions) if hasattr(ref_pt, 'positions') else []
-        fb_pos = list(fb_pt.positions) if hasattr(fb_pt, 'positions') else []
+        fb_pos  = list(fb_pt.positions)  if hasattr(fb_pt, 'positions') else []
         err_pos = list(err_pt.positions) if hasattr(err_pt, 'positions') else []
-        fb_vel = list(fb_pt.velocities) if hasattr(fb_pt, 'velocities') else []
-        
+        fb_vel  = list(fb_pt.velocities) if hasattr(fb_pt, 'velocities') else []
+
         data['t'].append(t_rel)
-        
+
+        # 関節データ
+        # ※毎回 list(msg.joint_names).index(...) すると重いので、最初のmsg_joint_names基準で index を使う
         for jn in joint_names:
-            # joint_namesからインデックスを取得
-            if hasattr(msg, 'joint_names'):
-                try:
-                    idx = list(msg.joint_names).index(jn)
-                except ValueError:
-                    idx = joint_names.index(jn)
-            else:
+            idx = name_to_idx.get(jn, None)
+            if idx is None:
                 idx = joint_names.index(jn)
-            
+
             data['joints'][jn]['ref'].append(ref_pos[idx] if idx < len(ref_pos) else 0.0)
-            data['joints'][jn]['fb'].append(fb_pos[idx] if idx < len(fb_pos) else 0.0)
+            data['joints'][jn]['fb'].append(fb_pos[idx]  if idx < len(fb_pos)  else 0.0)
             data['joints'][jn]['err'].append(err_pos[idx] if idx < len(err_pos) else 0.0)
             data['joints'][jn]['vel'].append(fb_vel[idx] if idx < len(fb_vel) else 0.0)
-    
+
+        # ===== EE（ref/fb/err）=====
+        if fk_ready:
+            try:
+                jp_ref = {}
+                jp_fb  = {}
+
+                for cjn in chain_joint_names:
+                    cidx = name_to_idx[cjn]
+                    jp_ref[cjn] = ref_pos[cidx] if cidx < len(ref_pos) else 0.0
+                    jp_fb[cjn]  = fb_pos[cidx]  if cidx < len(fb_pos)  else 0.0
+
+                ee_ref = fk_solver.compute(jp_ref)
+                ee_fb  = fk_solver.compute(jp_fb)
+
+                if ee_ref is None or ee_fb is None:
+                    # NaNで埋める（列数合わせ）
+                    for a in range(3):
+                        data['ee']['pos']['ref'][a].append(float('nan'))
+                        data['ee']['pos']['fb'][a].append(float('nan'))
+                        data['ee']['pos']['err'][a].append(float('nan'))
+                else:
+                    ex = ee_fb[0] - ee_ref[0]
+                    ey = ee_fb[1] - ee_ref[1]
+                    ez = ee_fb[2] - ee_ref[2]
+
+                    data['ee']['pos']['ref'][0].append(ee_ref[0])
+                    data['ee']['pos']['ref'][1].append(ee_ref[1])
+                    data['ee']['pos']['ref'][2].append(ee_ref[2])
+
+                    data['ee']['pos']['fb'][0].append(ee_fb[0])
+                    data['ee']['pos']['fb'][1].append(ee_fb[1])
+                    data['ee']['pos']['fb'][2].append(ee_fb[2])
+
+                    data['ee']['pos']['err'][0].append(ex)
+                    data['ee']['pos']['err'][1].append(ey)
+                    data['ee']['pos']['err'][2].append(ez)
+
+            except Exception:
+                for a in range(3):
+                    data['ee']['pos']['ref'][a].append(float('nan'))
+                    data['ee']['pos']['fb'][a].append(float('nan'))
+                    data['ee']['pos']['err'][a].append(float('nan'))
+
     return data
 
 
@@ -370,7 +450,11 @@ Examples:
     print(f"Output directory: {output_dir}")
     
     # bagから抽出
-    data_csv, plan_csv = extract_data_from_bag(args.bag, output_dir, urdf_path, args.state_topic)
+    data_csv, plan_csv = extract_data_from_bag(
+        args.bag, output_dir, urdf_path, args.state_topic,
+        base_link=args.base_link,
+        tip_link="bucket_end_link"
+    )
     
     if data_csv is None:
         return 1

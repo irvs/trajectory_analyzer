@@ -135,6 +135,12 @@ class TrajFollowRecordActionServer(Node):
         self.out_plan_csv = ""
         self.bag_dir = ""
 
+        # ===== recorded EE buffers (ref/fb) =====
+        self.ee_ref = [[], [], []]   # x,y,z
+        self.ee_fb  = [[], [], []]   # x,y,z
+        self.ee_err = [[], [], []]   # x,y,z (fb - ref)
+        self.ee_dist_err = []        # ||fb-ref||
+
         # 記録データ
         self.field_label = None
         self.n_all = None
@@ -198,10 +204,11 @@ class TrajFollowRecordActionServer(Node):
     # ---------------------------
 
     def goal_cb(self, goal_request: TrajFollow.Goal):
-        # 同時実行は拒否
+        self.get_logger().info("goal_cb called")
         if self._goal_handle is not None:
-            self.get_logger().warn("Another goal is active; rejecting new goal.")
+            self.get_logger().info("Another goal is active; rejecting new goal.")
             return GoalResponse.REJECT
+        self.get_logger().info("Goal ACCEPT")
         return GoalResponse.ACCEPT
 
     def cancel_cb(self, goal_handle):
@@ -269,17 +276,6 @@ class TrajFollowRecordActionServer(Node):
         self.get_logger().info(msg)
 
         self._goal_handle = None
-
-        # 停止処理～保存のあと
-        ok, msg = self._finalize_and_save()
-        self.get_logger().info("FINALIZE DONE, about to return action result")  # ★追加
-
-        result = TrajFollow.Result()
-        result.ok = bool(ok)
-
-        self.get_logger().info("RETURNING RESULT now")  # ★追加
-        self._goal_handle = None
-        return result
         return result
 
     # ---------------------------
@@ -461,6 +457,13 @@ class TrajFollowRecordActionServer(Node):
         self.err = []
         self.vel = []
 
+        # ===== recorded EE buffers (ref/fb) =====
+        self.ee_ref = [[], [], []]
+        self.ee_fb  = [[], [], []]
+        self.ee_err = [[], [], []]
+        self.ee_dist_err = []
+
+
         self._joint_name_to_msg_index = {}
         
         # ===== plan trajectory buffers =====
@@ -541,6 +544,45 @@ class TrajFollowRecordActionServer(Node):
                     self._joint_name_to_msg_index = m
                     self.get_logger().info("FK joint mapping is ready")
 
+                # ===== FK: EE position compute for each sample =====
+        if self._fk_ready and self._fk_solver is not None and self._joint_name_to_msg_index:
+            try:
+                # ref / fb の joint_positions を作る（チェーン関節のみ）
+                joint_positions_ref = {}
+                joint_positions_fb  = {}
+
+                for jn in self._chain_joint_names:
+                    idx = self._joint_name_to_msg_index[jn]
+                    joint_positions_ref[jn] = ref_pos[idx] if idx < len(ref_pos) else 0.0
+                    joint_positions_fb[jn]  = fb_pos[idx]  if idx < len(fb_pos)  else 0.0
+
+                ee_ref = self._fk_solver.compute(joint_positions_ref)
+                ee_fb  = self._fk_solver.compute(joint_positions_fb)
+
+                if ee_ref is None or ee_fb is None:
+                    # FK失敗時はNaNで埋める（CSV列数を合わせるため）
+                    self.ee_ref[0].append(math.nan); self.ee_ref[1].append(math.nan); self.ee_ref[2].append(math.nan)
+                    self.ee_fb[0].append(math.nan);  self.ee_fb[1].append(math.nan);  self.ee_fb[2].append(math.nan)
+                    self.ee_err[0].append(math.nan); self.ee_err[1].append(math.nan); self.ee_err[2].append(math.nan)
+                    self.ee_dist_err.append(math.nan)
+                else:
+                    ex = ee_fb[0] - ee_ref[0]
+                    ey = ee_fb[1] - ee_ref[1]
+                    ez = ee_fb[2] - ee_ref[2]
+                    dist = math.sqrt(ex*ex + ey*ey + ez*ez)
+
+                    self.ee_ref[0].append(ee_ref[0]); self.ee_ref[1].append(ee_ref[1]); self.ee_ref[2].append(ee_ref[2])
+                    self.ee_fb[0].append(ee_fb[0]);   self.ee_fb[1].append(ee_fb[1]);   self.ee_fb[2].append(ee_fb[2])
+                    self.ee_err[0].append(ex);        self.ee_err[1].append(ey);        self.ee_err[2].append(ez)
+                    self.ee_dist_err.append(dist)
+
+            except Exception as e:
+                # FK計算中に例外が出ても記録自体は止めない
+                self.ee_ref[0].append(math.nan); self.ee_ref[1].append(math.nan); self.ee_ref[2].append(math.nan)
+                self.ee_fb[0].append(math.nan);  self.ee_fb[1].append(math.nan);  self.ee_fb[2].append(math.nan)
+                self.ee_err[0].append(math.nan); self.ee_err[1].append(math.nan); self.ee_err[2].append(math.nan)
+                self.ee_dist_err.append(math.nan)
+
     # ---------------------------
     # Phase lag estimation は trajectory_analyzer.py の TrajectoryAnalyzer を使用
     # ---------------------------
@@ -557,6 +599,18 @@ class TrajFollowRecordActionServer(Node):
             't': self.t,
             'joints': {}
         }
+
+        # ★EE（ref/fb/err）と距離誤差
+        if len(self.ee_ref[0]) == len(self.t):
+            data['ee'] = {
+                'pos': {
+                    'ref': self.ee_ref,
+                    'fb':  self.ee_fb,
+                    'err': self.ee_err,
+                }
+            }
+        if len(self.ee_dist_err) == len(self.t):
+            data['ee_dist_err'] = self.ee_dist_err
         
         for j in self.plot_joints:
             joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
@@ -599,6 +653,18 @@ class TrajFollowRecordActionServer(Node):
             't': self.t,
             'joints': {}
         }
+
+        # ★EE（ref/fb/err）と距離誤差
+        if len(self.ee_ref[0]) == len(self.t):
+            data['ee'] = {
+                'pos': {
+                    'ref': self.ee_ref,
+                    'fb':  self.ee_fb,
+                    'err': self.ee_err,
+                }
+            }
+        if len(self.ee_dist_err) == len(self.t):
+            data['ee_dist_err'] = self.ee_dist_err
         
         for j in self.plot_joints:
             joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
