@@ -76,12 +76,13 @@ class TrajFollowRecordActionServer(Node):
         super().__init__("traj_follow_record_action_server")
 
         # URDFの実際の関節名を定義（zx200用）
+        # bucket_end_jointは実際には使われないため除外
         self.urdf_joint_names = [
             "swing_joint",
             "boom_joint",
             "arm_joint",
             "bucket_joint",
-            "bucket_end_joint"
+            # "bucket_end_joint"  # ★除外：FKに使わず、遅れ推定で異常値を出すため
         ]
 
         self.t: List[float] = []
@@ -99,21 +100,13 @@ class TrajFollowRecordActionServer(Node):
         self.declare_parameter("output_root", os.path.normpath(default_output))
         self.declare_parameter("record_bag_all", True)     # -a相当をデフォルトで回すか
 
-        self.declare_parameter("max_lag_s", 5.0)
-        self.declare_parameter("phase_use_velocity", False)
-        self.declare_parameter("lag_method", "frequency")  # "correlation", "dtw", "gradient", "adaptive_kalman", "frequency", "polynomial"
-
-        # ===== FK/URDF 追加パラメータ =====
-        self.declare_parameter("urdf_path", os.path.normpath(default_urdf))  # 相対パス: traj_follow_plotterから見て../urdf/
+        # ===== FK/URDF パラメータ =====
+        self.declare_parameter("urdf_path", os.path.normpath(default_urdf))
         self.declare_parameter("fk_base_link", "base_link")
         self.declare_parameter("fk_tip_link", "bucket_end_link")
 
         # ===== 共通解析器を作成 =====
-        self.analyzer = TrajectoryAnalyzer(
-            max_lag_s=float(self.get_parameter("max_lag_s").value),
-            lag_method=str(self.get_parameter("lag_method").value),
-            phase_use_velocity=bool(self.get_parameter("phase_use_velocity").value)
-        )
+        self.analyzer = TrajectoryAnalyzer()
 
         # ---- Action Server ----
         self._action_srv = ActionServer(
@@ -131,15 +124,9 @@ class TrajFollowRecordActionServer(Node):
 
         self.started = False
         self.start_time: Optional[float] = None
-        if len(self.t) > 1:
-            self.dt_est = np.mean(np.diff(self.t))
-        else:
-            self.dt_est = 0.02  # fallback
+        self.dt_est = 0.02  # fallback
 
         self.topic = str(self.get_parameter("state_topic").value)
-
-        self.max_lag_s = float(self.get_parameter("max_lag_s").value)
-        self.phase_use_velocity = bool(self.get_parameter("phase_use_velocity").value)
 
         # 出力ディレクトリ（Goalごとにサブディレクトリ）
         self.output_root = str(self.get_parameter("output_root").value)
@@ -163,33 +150,17 @@ class TrajFollowRecordActionServer(Node):
 
         # bag用
         self._bag_proc: Optional[subprocess.Popen] = None
-        self._bag_log = None  # ★追加：ログファイルハンドル
+        self._bag_log = None  # ログファイルハンドル
         self._record_bag_all = bool(self.get_parameter("record_bag_all").value)
 
         # matplotlibは最後だけ描画
         plt.ioff()
 
-        # ===== FK 状態追加 =====
+        # ===== FK 状態 =====
         self._fk_solver = None
         self._fk_ready = False
         self._fk_failed_reason = ""
-
-        # 刃先（EE）ログ: 位置(x,y,z)
-        self.ee_ref = [[], [], []]
-        self.ee_fb  = [[], [], []]
-        self.ee_err = [[], [], []]
-
-        # 刃先（EE）ログ: 姿勢（RPY: roll,pitch,yaw）
-        self.ee_rpy_ref = [[], [], []]
-        self.ee_rpy_fb  = [[], [], []]
-        self.ee_rpy_err = [[], [], []]
-
-        # 刃先（EE）ログ: 姿勢（Quaternion: x,y,z,w）※CSV用にも残す
-        self.ee_quat_ref = [[], [], [], []]
-        self.ee_quat_fb  = [[], [], [], []]
-
-        # 刃先（EE）ログ: 3D距離誤差
-        self.ee_dist_err = []  # sqrt(ex^2 + ey^2 + ez^2)
+        self._joint_name_to_msg_index = {}
 
         # URDF 読み込み & FK チェーン準備（失敗しても計測自体は続行）
         self._init_fk_from_urdf()
@@ -199,7 +170,7 @@ class TrajFollowRecordActionServer(Node):
         self.plan_pos = []
         self.plan_joint_names = []  # Plan軌道の関節名を保存
         
-        # ===== plan EE position buffers =====
+        # ===== plan EE position buffers (FK計算用) =====
         self.ee_plan = [[], [], []]  # x, y, z
 
     # ---------------------------
@@ -481,15 +452,6 @@ class TrajFollowRecordActionServer(Node):
         self.err = []
         self.vel = []
 
-        # ===== FK buffers reset =====
-        self.ee_ref = [[], [], []]
-        self.ee_fb  = [[], [], []]
-        self.ee_err = [[], [], []]
-
-        self.ee_rpy_ref = [[], [], []]
-        self.ee_rpy_fb  = [[], [], []]
-        self.ee_rpy_err = [[], [], []]
-
         self._joint_name_to_msg_index = {}
         
         # ===== plan trajectory buffers =====
@@ -570,70 +532,6 @@ class TrajFollowRecordActionServer(Node):
                     self._joint_name_to_msg_index = m
                     self.get_logger().info("FK joint mapping is ready")
 
-        # ===== FK: bucket_end_link の位置/姿勢を保存 =====
-        if self._fk_ready and self._fk_solver is not None:
-            try:
-                # 関節角度を辞書形式で準備
-                joint_positions_ref = {}
-                joint_positions_fb = {}
-                
-                for jn in self._chain_joint_names:
-                    idx = self._joint_name_to_msg_index.get(jn)
-                    if idx is not None and idx < len(ref_pos):
-                        joint_positions_ref[jn] = ref_pos[idx]
-                        joint_positions_fb[jn] = fb_pos[idx]
-                    else:
-                        joint_positions_ref[jn] = 0.0
-                        joint_positions_fb[jn] = 0.0
-                
-                # FK計算（共通モジュールを使用）
-                ee_ref_pos = self._fk_solver.compute(joint_positions_ref)
-                ee_fb_pos = self._fk_solver.compute(joint_positions_fb)
-
-                if ee_ref_pos is not None and ee_fb_pos is not None:
-                    # position
-                    xr, yr, zr = ee_ref_pos
-                    xf, yf, zf = ee_fb_pos
-
-                    self.ee_ref[0].append(xr); self.ee_ref[1].append(yr); self.ee_ref[2].append(zr)
-                    self.ee_fb[0].append(xf);  self.ee_fb[1].append(yf);  self.ee_fb[2].append(zf)
-                    self.ee_err[0].append(xr - xf); self.ee_err[1].append(yr - yf); self.ee_err[2].append(zr - zf)
-
-                    # 3D距離誤差
-                    dist_err = math.sqrt((xr - xf)**2 + (yr - yf)**2 + (zr - zf)**2)
-                    self.ee_dist_err.append(dist_err)
-
-                    # Quaternion/RPY（PyKDLから取得する必要がある場合は既存のコードを使用）
-                    # ここでは位置のみ計算し、姿勢は既存のコードを維持
-                    # 姿勢の計算は既存のPyKDL直接呼び出しを使用
-                    for a in range(3):
-                        self.ee_rpy_ref[a].append(math.nan)
-                        self.ee_rpy_fb[a].append(math.nan)
-                        self.ee_rpy_err[a].append(math.nan)
-
-                    for a in range(4):
-                        self.ee_quat_ref[a].append(math.nan)
-                        self.ee_quat_fb[a].append(math.nan)
-                else:
-                    for a in range(3):
-                        self.ee_ref[a].append(math.nan)
-                        self.ee_fb[a].append(math.nan)
-                        self.ee_err[a].append(math.nan)
-
-                        self.ee_rpy_ref[a].append(math.nan)
-                        self.ee_rpy_fb[a].append(math.nan)
-                        self.ee_rpy_err[a].append(math.nan)
-
-                    for a in range(4):
-                        self.ee_quat_ref[a].append(math.nan)
-                        self.ee_quat_fb[a].append(math.nan)
-
-                    self.ee_dist_err.append(math.nan)
-
-            except Exception as e:
-                self.get_logger().warn("FK failed during run; disabling FK.\n" + traceback.format_exc())
-                self._fk_ready = False
-
     # ---------------------------
     # Phase lag estimation は trajectory_analyzer.py の TrajectoryAnalyzer を使用
     # ---------------------------
@@ -643,114 +541,12 @@ class TrajFollowRecordActionServer(Node):
     # ---------------------------
 
     def save_csv(self, path: str):
-        add_ee_pos = (len(self.ee_ref[0]) == len(self.t) and len(self.t) > 0)
-        add_ee_rpy = (len(self.ee_rpy_ref[0]) == len(self.t) and len(self.t) > 0)
-        add_ee_quat = (len(self.ee_rpy_ref[0]) == len(self.t) and len(self.t) > 0)
-
-        with open(path, "w", encoding="utf-8") as f:
-            header = ["t"]
-            
-            # URDFの実際の関節名を使用（j0, j1...の代わりに）
-            for j in self.plot_joints:
-                joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
-                header += [f"{joint_name}_ref", f"{joint_name}_fb", f"{joint_name}_err", f"{joint_name}_vel"]
-
-            if add_ee_pos:
-                header += ["ee_ref_x", "ee_ref_y", "ee_ref_z",
-                           "ee_fb_x",  "ee_fb_y",  "ee_fb_z",
-                           "ee_err_x", "ee_err_y", "ee_err_z",
-                           "ee_dist_err"]
-
-            if add_ee_rpy:
-                header += ["ee_rpy_ref_roll", "ee_rpy_ref_pitch", "ee_rpy_ref_yaw",
-                           "ee_rpy_fb_roll",  "ee_rpy_fb_pitch",  "ee_rpy_fb_yaw",
-                           "ee_rpy_err_roll", "ee_rpy_err_pitch", "ee_rpy_err_yaw"]
-
-            if add_ee_quat:
-                header += ["ee_quat_ref_x", "ee_quat_ref_y", "ee_quat_ref_z", "ee_quat_ref_w",
-                           "ee_quat_fb_x",  "ee_quat_fb_y",  "ee_quat_fb_z",  "ee_quat_fb_w"]
-
-            f.write(",".join(header) + "\n")
-
-            for i, t in enumerate(self.t):
-                row = [f"{t:.9f}"]
-                for j in self.plot_joints:
-                    row.append(f"{self.ref[j][i]}")
-                    row.append(f"{self.fb[j][i]}")
-                    row.append(f"{self.err[j][i]}")
-                    row.append(f"{self.vel[j][i]}")
-
-                if add_ee_pos:
-                    row += [f"{self.ee_ref[0][i]}", f"{self.ee_ref[1][i]}", f"{self.ee_ref[2][i]}",
-                            f"{self.ee_fb[0][i]}",  f"{self.ee_fb[1][i]}",  f"{self.ee_fb[2][i]}",
-                            f"{self.ee_err[0][i]}", f"{self.ee_err[1][i]}", f"{self.ee_err[2][i]}",
-                            f"{self.ee_dist_err[i]}"]
-
-                if add_ee_rpy:
-                    row += [f"{self.ee_rpy_ref[0][i]}", f"{self.ee_rpy_ref[1][i]}", f"{self.ee_rpy_ref[2][i]}",
-                            f"{self.ee_rpy_fb[0][i]}",  f"{self.ee_rpy_fb[1][i]}",  f"{self.ee_rpy_fb[2][i]}",
-                            f"{self.ee_rpy_err[0][i]}", f"{self.ee_rpy_err[1][i]}", f"{self.ee_rpy_err[2][i]}"]
-
-                if add_ee_quat:
-                    row += [f"{self.ee_quat_ref[0][i]}", f"{self.ee_quat_ref[1][i]}", f"{self.ee_quat_ref[2][i]}", f"{self.ee_quat_ref[3][i]}",
-                            f"{self.ee_quat_fb[0][i]}",  f"{self.ee_quat_fb[1][i]}",  f"{self.ee_quat_fb[2][i]}",  f"{self.ee_quat_fb[3][i]}"]
-
-                f.write(",".join(row) + "\n")
-
-    def save_plan_csv(self, path: str):
-        """Plan軌道専用のCSVを保存（時刻、関節角度、EE位置のみ）"""
-        if not self.plan_t or not self.plan_pos:
-            self.get_logger().warn("No plan data to save")
-            return
+        """data.csvを保存（共通モジュールを使用）"""
+        from .trajectory_analyzer import save_data_csv
         
-        with open(path, "w", encoding="utf-8") as f:
-            header = ["t"]
-            
-            # 関節名
-            for j in self.plot_joints:
-                joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
-                header.append(joint_name)
-            
-            # EE位置
-            if len(self.ee_plan[0]) > 0:
-                header += ["ee_x", "ee_y", "ee_z"]
-            
-            f.write(",".join(header) + "\n")
-            
-            # データ行
-            for i, t in enumerate(self.plan_t):
-                row = [f"{t:.9f}"]
-                
-                # 関節角度
-                if i < len(self.plan_pos):
-                    for j in self.plot_joints:
-                        if j < len(self.plan_pos[i]):
-                            row.append(f"{self.plan_pos[i][j]}")
-                        else:
-                            row.append("nan")
-                
-                # EE位置
-                if len(self.ee_plan[0]) > 0 and i < len(self.ee_plan[0]):
-                    row.append(f"{self.ee_plan[0][i]}")
-                    row.append(f"{self.ee_plan[1][i]}")
-                    row.append(f"{self.ee_plan[2][i]}")
-                
-                f.write(",".join(row) + "\n")
-        
-        self.get_logger().info(f"Saved plan CSV: {path}")
-
-    def _finalize_and_save(self) -> Tuple[bool, str]:
-        if len(self.t) == 0:
-            return False, "No samples recorded; nothing saved."
-
-        # ===== 共通モジュールを使ってプロット作成 =====
-        # データを辞書形式に変換
         data = {
             't': self.t,
-            'dt_est': self.dt_est,
-            'joints': {},
-            'ee': {},
-            'ee_dist_err': self.ee_dist_err
+            'joints': {}
         }
         
         for j in self.plot_joints:
@@ -762,11 +558,46 @@ class TrajFollowRecordActionServer(Node):
                 'vel': self.vel[j]
             }
         
-        if len(self.ee_ref[0]) > 0:
-            data['ee']['pos'] = {
-                'ref': self.ee_ref,
-                'fb': self.ee_fb,
-                'err': self.ee_err
+        save_data_csv(data, path, self.urdf_joint_names)
+
+    def save_plan_csv(self, path: str):
+        """Plan軌道専用のCSVを保存（共通モジュールを使用）"""
+        from .trajectory_analyzer import save_plan_csv
+        
+        if not self.plan_t or not self.plan_pos:
+            self.get_logger().warn("No plan data to save")
+            return
+        
+        plan_data = {
+            't': self.plan_t,
+            'joints': {},
+            'ee': self.ee_plan if len(self.ee_plan[0]) > 0 else None
+        }
+        
+        for j in self.plot_joints:
+            joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
+            if self.plan_pos and j < len(self.plan_pos[0]):
+                plan_data['joints'][joint_name] = [pos[j] for pos in self.plan_pos if j < len(pos)]
+        
+        save_plan_csv(plan_data, path, self.urdf_joint_names)
+
+    def _finalize_and_save(self) -> Tuple[bool, str]:
+        if len(self.t) == 0:
+            return False, "No samples recorded; nothing saved."
+
+        # ===== データを辞書形式に変換 =====
+        data = {
+            't': self.t,
+            'joints': {}
+        }
+        
+        for j in self.plot_joints:
+            joint_name = self.urdf_joint_names[j] if j < len(self.urdf_joint_names) else f"j{j}"
+            data['joints'][joint_name] = {
+                'ref': self.ref[j],
+                'fb': self.fb[j],
+                'err': self.err[j],
+                'vel': self.vel[j]
             }
         
         # Planデータ
@@ -783,36 +614,37 @@ class TrajFollowRecordActionServer(Node):
                 if self.plan_pos and j < len(self.plan_pos[0]):
                     plan_data['joints'][joint_name] = [pos[j] for pos in self.plan_pos if j < len(pos)]
         
-        # 共通モジュールを使ってプロット作成
-        from .trajectory_analyzer import create_plot, save_compensated_csv
-        try:
-            create_plot(
-                data=data,
-                plan_data=plan_data,
-                analyzer=self.analyzer,
-                output_path=self.out_png,
-                topic=self.topic,
-                field_label=self.field_label or "unknown"
-            )
-        except Exception as e:
-            self.get_logger().error(f"Failed to create plot: {e}")
-            import traceback
-            self.get_logger().error(traceback.format_exc())
-        
+        # CSV保存
         self.save_csv(self.out_csv)
         self.save_plan_csv(self.out_plan_csv)
         
-        # 補正済みCSVを保存
-        compensated_csv = os.path.join(self.out_dir, 'data_compensated.csv')
-        try:
-            save_compensated_csv(data, self.analyzer, compensated_csv)
-            self.get_logger().info(f"Saved compensated CSV: {compensated_csv}")
-        except Exception as e:
-            self.get_logger().error(f"Failed to save compensated CSV: {e}")
-            import traceback
-            self.get_logger().error(traceback.format_exc())
+        # ★Link padding解析を実行（これがメイン出力）
+        urdf_path = str(self.get_parameter("urdf_path").value)
+        if plan_data and plan_data['t'] and plan_data['joints']:
+            try:
+                from .trajectory_analyzer import analyze_link_padding
+                
+                self.get_logger().info("Starting link padding analysis...")
+                analyze_link_padding(
+                    data=data,
+                    plan_data=plan_data,
+                    analyzer=self.analyzer,
+                    urdf_path=urdf_path,
+                    output_dir=self.out_dir
+                )
+                
+                # link_padding_summary.pngがメインの解析結果
+                summary_plot = os.path.join(self.out_dir, 'link_padding_summary.png')
+                self.get_logger().info(f"✓ Link padding analysis complete!")
+                self.get_logger().info(f"  Main result: {summary_plot}")
+            except Exception as e:
+                self.get_logger().error(f"Failed to analyze link padding: {e}")
+                import traceback
+                self.get_logger().error(traceback.format_exc())
+        else:
+            self.get_logger().warn("Skipping link padding analysis: no plan data available")
 
-        return True, f"Saved: {self.out_png}, {self.out_csv}, {compensated_csv}, {self.out_plan}, {self.out_plan_csv}, bag={self.bag_dir}"
+        return True, f"Saved: {self.out_csv}, {self.out_plan_csv}, link_padding_summary.png in {self.out_dir}"
 
     # ---------------------------
     # ros2 bag record -a

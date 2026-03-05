@@ -43,22 +43,22 @@ def generate_launch_description():
         description='Record all topics with rosbag'
     )
     
-    max_lag_arg = DeclareLaunchArgument(
-        'max_lag_s',
-        default_value='5.0',
-        description='Maximum lag time in seconds for phase lag estimation'
-    )
-    
-    lag_method_arg = DeclareLaunchArgument(
-        'lag_method',
-        default_value='frequency',
-        description='Lag estimation method: correlation, dtw, frequency, polynomial, adaptive_kalman'
-    )
-    
     urdf_path_arg = DeclareLaunchArgument(
         'urdf_path',
         default_value=urdf_path_default,
         description='Path to URDF file for FK calculation'
+    )
+    
+    fk_base_link_arg = DeclareLaunchArgument(
+        'fk_base_link',
+        default_value='base_link',
+        description='Base link name for FK calculation'
+    )
+    
+    fk_tip_link_arg = DeclareLaunchArgument(
+        'fk_tip_link',
+        default_value='bucket_end_link',
+        description='Tip link name for FK calculation'
     )
 
     # Node configuration
@@ -72,12 +72,9 @@ def generate_launch_description():
             'state_topic': LaunchConfiguration('state_topic'),
             'output_root': LaunchConfiguration('output_root'),
             'record_bag_all': LaunchConfiguration('record_bag_all'),
-            'max_lag_s': LaunchConfiguration('max_lag_s'),
-            'phase_use_velocity': False,
-            'lag_method': LaunchConfiguration('lag_method'),
             'urdf_path': LaunchConfiguration('urdf_path'),
-            'fk_base_link': 'base_link',
-            'fk_tip_link': 'bucket_end_link',
+            'fk_base_link': LaunchConfiguration('fk_base_link'),
+            'fk_tip_link': LaunchConfiguration('fk_tip_link'),
         }],
     )
 
@@ -86,8 +83,8 @@ def generate_launch_description():
         state_topic_arg,
         output_root_arg,
         record_bag_arg,
-        max_lag_arg,
-        lag_method_arg,
         urdf_path_arg,
+        fk_base_link_arg,
+        fk_tip_link_arg,
         traj_follow_record_node,
     ])

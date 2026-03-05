@@ -13,6 +13,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.rviz')),
+        (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
         (os.path.join('share', package_name, 'meshes'), glob('meshes/*.dae')),
         (os.path.join('share', package_name, 'meshes'), glob('meshes/*.xacro')),
         (os.path.join('share', package_name, 'meshes'), glob('meshes/*.png')),
@@ -31,6 +32,7 @@ setup(
             'video_player = traj_follow_plotter.video_player_node:main',
             'generate_rviz_config = traj_follow_plotter.generate_rviz_config:main',
             'post_analysis = traj_follow_plotter.post_process_analysis:main',
+            'visualize_correspondence_node = traj_follow_plotter.visualize_correspondence_node:main',
         ],
     },
 )
