@@ -27,6 +27,8 @@ import yaml
 
 import matplotlib.pyplot as plt
 
+import asyncio
+
 # ★あなたのAction定義に合わせて import してください
 # 例: package名が traj_recorder_msgs の場合
 from traj_recorder_msgs.action import TrajFollow
@@ -214,16 +216,11 @@ class TrajFollowRecordActionServer(Node):
     def cancel_cb(self, goal_handle):
         return CancelResponse.ACCEPT
 
-    async def execute_cb(self, goal_handle):
+    def execute_cb(self, goal_handle):
         self._goal_handle = goal_handle
 
-        # 出力ディレクトリ作成（同一Goal内の成果物を全部ここへ）
         self._prepare_output_dir()
-
-        # state購読開始前にバッファリセット
         self._reset_buffers()
-
-        # plan（Goal内容）を即保存 ← _reset_buffers()の後に移動
         self._save_plan_yaml(goal_handle.request)
 
         self.topic = str(self.get_parameter("state_topic").value)
@@ -234,11 +231,9 @@ class TrajFollowRecordActionServer(Node):
             10,
         )
 
-        # 計測開始
         self.started = True
         self.start_time = self.get_clock().now().nanoseconds * 1e-9
 
-        # bag開始（-a相当）
         if self._record_bag_all:
             self._start_bag_record_all()
 
@@ -246,16 +241,14 @@ class TrajFollowRecordActionServer(Node):
         fb.status = f"recording: {self.topic}"
         goal_handle.publish_feedback(fb)
 
-        # Cancelされるまで回す
-        while rclpy.ok():
-            if goal_handle.is_cancel_requested:
-                fb.status = "cancel_requested: stopping"
-                goal_handle.publish_feedback(fb)
-                goal_handle.canceled()
-                break
+        # Cancel されるまで待つ（spin_once はしない）
+        while rclpy.ok() and not goal_handle.is_cancel_requested:
+            time.sleep(0.05)
 
-            # 少し回す（購読コールバックを回す）
-            rclpy.spin_once(self, timeout_sec=0.1)
+        if goal_handle.is_cancel_requested:
+            fb.status = "cancel_requested: stopping"
+            goal_handle.publish_feedback(fb)
+            goal_handle.canceled()
 
         # 停止処理
         self.started = False
@@ -274,7 +267,6 @@ class TrajFollowRecordActionServer(Node):
         result.ok = bool(ok)
 
         self.get_logger().info(msg)
-
         self._goal_handle = None
         return result
 
@@ -768,14 +760,21 @@ class TrajFollowRecordActionServer(Node):
                 self._bag_log = None
 
 
+from rclpy.executors import MultiThreadedExecutor
+
 def main():
     rclpy.init()
     node = TrajFollowRecordActionServer()
+
+    executor = MultiThreadedExecutor(num_threads=2)  # 2以上推奨
+    executor.add_node(node)
+
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
