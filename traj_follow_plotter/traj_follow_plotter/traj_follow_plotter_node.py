@@ -269,6 +269,17 @@ class TrajFollowRecordActionServer(Node):
         self.get_logger().info(msg)
 
         self._goal_handle = None
+
+        # 停止処理～保存のあと
+        ok, msg = self._finalize_and_save()
+        self.get_logger().info("FINALIZE DONE, about to return action result")  # ★追加
+
+        result = TrajFollow.Result()
+        result.ok = bool(ok)
+
+        self.get_logger().info("RETURNING RESULT now")  # ★追加
+        self._goal_handle = None
+        return result
         return result
 
     # ---------------------------
