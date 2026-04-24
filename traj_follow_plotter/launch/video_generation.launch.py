@@ -14,11 +14,11 @@ fb (緑): Feedback実測値
   # 0.5倍速（スロー再生）で録画
   ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS playback_speed:=0.5
 
-  # 通常ディスプレイで表示（等速）
-  ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS use_xvfb:=false
+  # 通常ディスプレイで表示（等速、録画なし）
+  ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS record:=false
 
   # 通常ディスプレイで2倍速表示
-  ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS use_xvfb:=false playback_speed:=2.0
+  ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS record:=false playback_speed:=2.0
 
   # namespace付きで起動（複数ロボット表示用、別ターミナルで実行）
   ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run1 robot_namespace:=robot1 use_xvfb:=false
@@ -37,8 +37,8 @@ import os
 import tempfile
 
 
-def generate_rviz_config(base_config_path, robot_namespace):
-    """namespace対応のRViz設定ファイルを動的に生成"""
+def generate_rviz_config(base_config_path, robot_namespace, camera_view, camera_distance):
+    """namespace対応およびカメラ視点対応のRViz設定ファイルを動的に生成"""
     with open(base_config_path, 'r') as f:
         config_content = f.read()
     
@@ -59,8 +59,15 @@ def generate_rviz_config(base_config_path, robot_namespace):
         config_content = config_content.replace('/video_gen/plan_ee_markers', f'/video_gen/{robot_namespace}/plan_ee_markers')
         config_content = config_content.replace('/video_gen/comparison_markers', f'/video_gen/{robot_namespace}/comparison_markers')
         
-        # Gridの参照フレームを最初のロボットに設定
+        # Grid的参照フレームを最初のロボットに設定
         config_content = config_content.replace('Reference Frame: ref/base_link', f'Reference Frame: {robot_namespace}/ref/base_link')
+    
+    # カメラ視点の切り替え（デフォルトが対角視点 3.927 になったため、diagonal指定で元の 0.785 に戻す）
+    if camera_view == 'diagonal':
+        config_content = config_content.replace('Yaw: 3.927', 'Yaw: 0.785')
+    
+    # カメラ距離の反映
+    config_content = config_content.replace('Distance: 20', f'Distance: {camera_distance}')
     
     # 一時ファイルに保存
     temp_config = tempfile.NamedTemporaryFile(mode='w', suffix='.rviz', delete=False)
@@ -73,12 +80,12 @@ def generate_rviz_config(base_config_path, robot_namespace):
 def generate_nodes(context, *args, **kwargs):
     """条件に応じてノードを生成"""
     data_dir = LaunchConfiguration('data_dir').perform(context)
-    use_xvfb = LaunchConfiguration('use_xvfb').perform(context)
+    record = LaunchConfiguration('record').perform(context)
     playback_speed = float(LaunchConfiguration('playback_speed').perform(context))
     robot_namespace = LaunchConfiguration('robot_namespace').perform(context)
     
-    # use_xvfbがtrueならXvfbを使用、falseなら現在のDISPLAYを使用
-    display = ':99' if use_xvfb.lower() == 'true' else os.environ.get('DISPLAY', ':0')
+    # recordがtrueならXvfbを使用、falseなら現在のDISPLAYを使用
+    display = ':99' if record.lower() == 'true' else os.environ.get('DISPLAY', ':0')
     
     # URDFとファイルパス
     urdf_file = PathJoinSubstitution([
@@ -116,8 +123,8 @@ def generate_nodes(context, *args, **kwargs):
     ref_base_link = f"{xacro_prefix_ref}base_link"
     fb_base_link = f"{xacro_prefix_fb}base_link"
     
-    # 1. Xvfb起動（use_xvfb=trueの場合のみ）
-    if use_xvfb.lower() == 'true':
+    # 1. Xvfb起動（record=trueの場合のみ）
+    if record.lower() == 'true':
         nodes.append(
             ExecuteProcess(
                 cmd=['Xvfb', ':99', '-screen', '0', '1920x1080x24'],
@@ -193,7 +200,7 @@ def generate_nodes(context, *args, **kwargs):
         parameters=[{
             'csv_path': csv_file,
             'playback_speed': playback_speed,
-            'loop': False if use_xvfb.lower() == 'true' else True,
+            'loop': False if record.lower() == 'true' else True,
             'robot_namespace': robot_namespace
         }],
         remappings=[
@@ -214,7 +221,9 @@ def generate_nodes(context, *args, **kwargs):
     nodes.append(video_player_delayed)
     
     # 6. RViz（3秒後に起動、namespace対応のRViz設定を動的生成）
-    rviz_config_path = generate_rviz_config(base_rviz_config, robot_namespace)
+    camera_view = LaunchConfiguration('camera_view').perform(context)
+    camera_distance = LaunchConfiguration('camera_distance').perform(context)
+    rviz_config_path = generate_rviz_config(base_rviz_config, robot_namespace, camera_view, camera_distance)
     
     rviz = TimerAction(
         period=3.0,
@@ -231,8 +240,8 @@ def generate_nodes(context, *args, **kwargs):
     )
     nodes.append(rviz)
     
-    # 7. ffmpeg（3秒後に録画開始、use_xvfb=trueの場合のみ）
-    if use_xvfb.lower() == 'true':
+    # 7. ffmpeg（3秒後に録画開始、record=trueの場合のみ）
+    if record.lower() == 'true':
         ffmpeg = TimerAction(
             period=3.0,
             actions=[
@@ -256,8 +265,8 @@ def generate_nodes(context, *args, **kwargs):
         )
         nodes.append(ffmpeg)
     
-    # 8. video_playerが終了したら3秒待ってシャットダウン（use_xvfb=trueの場合のみ）
-    if use_xvfb.lower() == 'true':
+    # 8. video_playerが終了したら3秒待ってシャットダウン（record=trueの場合のみ）
+    if record.lower() == 'true':
         shutdown_handler = RegisterEventHandler(
             OnProcessExit(
                 target_action=video_player,
@@ -281,10 +290,10 @@ def generate_launch_description():
         description='Path to recorded data directory'
     )
     
-    use_xvfb_arg = DeclareLaunchArgument(
-        'use_xvfb',
+    record_arg = DeclareLaunchArgument(
+        'record',
         default_value='true',
-        description='Use Xvfb (virtual display) for recording. Set to false to use current display.'
+        description='Record video using Xvfb (virtual display). Set to false to use current display and check only.'
     )
     
     playback_speed_arg = DeclareLaunchArgument(
@@ -299,10 +308,24 @@ def generate_launch_description():
         description='Namespace for the robot (e.g., robot1, robot2). Leave empty for no namespace.'
     )
     
+    camera_view_arg = DeclareLaunchArgument(
+        'camera_view',
+        default_value='normal',
+        description='Camera view in RViz. options: normal, diagonal'
+    )
+    
+    camera_distance_arg = DeclareLaunchArgument(
+        'camera_distance',
+        default_value='20.0',
+        description='Camera distance in RViz. Default is 20.0.'
+    )
+    
     return LaunchDescription([
         data_dir_arg,
-        use_xvfb_arg,
+        record_arg,
         playback_speed_arg,
         robot_namespace_arg,
+        camera_view_arg,
+        camera_distance_arg,
         OpaqueFunction(function=generate_nodes)
     ])

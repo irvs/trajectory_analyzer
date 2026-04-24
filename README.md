@@ -42,14 +42,21 @@ source install/setup.bash
 デフォルトでは`animaton.mp4`が指定したディレクトリに作成されます。
 
 ```bash
+# 通常の視点（対角視点）での録画
 ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=path/to/run_dir
+
+# 以前の視点からの録画（camera_view引数にdiagonalを指定）
+ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=path/to/run_dir camera_view:=diagonal
+
+# 撮影距離を指定して録画（デフォルトは20.0）
+ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=path/to/run_dir camera_distance:=25.0
 ```
 
-### RViz表示（MP4生成なし）
-現在のディスプレイを使用してRVizを表示します。デバッグや録画なしでの確認に使用できます。
+### RViz表示（MP4生成なし・確認のみ）
+現在のディスプレイを使用してRVizを表示します。デバッグや録画なしでの確認に便利です。
 
 ```bash
-ros2 launch traj_follow_plotter video_generation.launch.py use_xvfb:=false data_dir:=path/to/run_dir
+ros2 launch traj_follow_plotter video_generation.launch.py record:=false data_dir:=path/to/run_dir
 ```
 
 ### 追従誤差の可視化
@@ -102,7 +109,7 @@ colcon build --symlink-install --packages-up-to traj_follow_plotter traj_recorde
 source install/setup.bash
 ```
 
-5. GUIのボタンを押して油圧ショベルのタスクを起動する前に軌道の記録を開始する。
+5. GUIのボタンを押して油圧ショベルのタスクを起動する前に軌道の記録を開始する。現状では`primitive_excavator_change_pose_execute_from_plan_retime`を実行する前に以下のコマンドを実行する必要がある。
 
 ```bash
 ros2 launch traj_follow_plotter traj_follow_record.launch.py
