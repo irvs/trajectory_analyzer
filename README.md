@@ -52,8 +52,16 @@ ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=path/to/run
 ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=path/to/run_dir camera_distance:=25.0
 ```
 
+実機の軌道が表示されない場合は、そのrunディレクトリ内にあるdata.csvにエンドエフェクタ座標が含まれていない可能性があるため、以下のコマンドを実行してください。元のcsvファイルをdata_backup.csvとして保存し、data.csvにエンドエフェクタ座標を追加します。
+
+```bash
+cd ~/ros2-tms-for-construction_ws
+source install/setup.bash
+python3 src/traj_follow_measurement/traj_follow_plotter/scripts/add_ee_to_csv.py [data.csvのパス]
+```
+
 ### RViz表示（MP4生成なし・確認のみ）
-現在のディスプレイを使用してRVizを表示します。デバッグや録画なしでの確認に便利です。
+現在のディスプレイを使用してRVizを表示します。デバッグや録画なしでの確認に使用します。
 
 ```bash
 ros2 launch traj_follow_plotter video_generation.launch.py record:=false data_dir:=path/to/run_dir
@@ -70,47 +78,46 @@ ros2 launch traj_follow_plotter visualize_correspondence.launch.py csv_dir:=path
 
 シミュレータ（OperaSim-PhysX）で動作させた油圧ショベルの軌跡を記録することができます。
 
-1. ros2_tms_for_constructionとtms_if_for_operaを`feature/primitive`ブランチに切り替える。
+1. ros2_tms_for_constructionとtms_if_for_operaを`feature/subtask_for_excavator`ブランチに切り替える。
 
-2. `tms_ts/tms_ts_launch/tms_ts_construction.launch.py`の`primitive_excavator_change_pose_execute_from_plan_retime`のコメントアウトを外す。（新たな別のlaunchファイルとしてコピーしてから修正することを推奨します）
-```xml
-Node(
-    package='tms_ts_primitive',
-    executable='primitive_excavator_change_pose_execute_from_plan_retime',
-    output='screen',
-    parameters = [{'use_sim_time': LaunchConfiguration('use_sim_time')}],
-    namespace = 'zx200'),
-```
-
-3. tms_ts/tms_ts_primitiveの`CMakeLists.txt`の以下のコメントアウトを外す。
-```xml
-find_package(traj_recorder_msgs REQUIRED)
-
-add_executable(primitive_excavator_change_pose_execute_from_plan_retime src/Excavator/
-
-set(TARGETS
-    ...
-    primitive_excavator_change_pose_execute_from_plan_retime.cpp)
-    ...
-)
-
-ament_target_dependencies(primitive_excavator_change_pose_execute_from_plan_retime
-  srdfdom
-  moveit_core
-  moveit_ros_planning
-  traj_recorder_msgs
-)
-```
-
-4. ワークスペースをビルドする。
+2. ワークスペースをビルドする。
 
 ```bash
-colcon build --symlink-install --packages-up-to traj_follow_plotter traj_recorder_msgs
+cd ~/ros2-tms-for-construction_ws
+source install/setup.bash
+colcon build
 source install/setup.bash
 ```
 
-5. GUIのボタンを押して油圧ショベルのタスクを起動する前に軌道の記録を開始する。現状では`primitive_excavator_change_pose_execute_from_plan_retime`を実行する前に以下のコマンドを実行する必要がある。
+3. タスクを登録する。
 
 ```bash
+ros2 run tms_ts_manager task_generator.py --ros-args -p bt_tree_xml_file_name:=ExcavateRelease_combined_1_23.xml
+```
+
+4. シミュレータを再生し、以下のコマンドを実行して掘削動作の軌道を記録する。
+
+```bash
+# Terminal 1
+ros2 launch ros_tcp_endpoint endpoint.py
+```
+
+```bash
+# Terminal 2
+ros2 launch tms_if_for_opera tms_if_for_opera.launch.py
+```
+
+```bash
+# Terminal 3
+ros2 launch zx200_bringup vehicle.launch.py use_rviz:=true command_interface_name:=velocity
+```
+
+```bash
+# Terminal 4
+ros2 launch tms_ts_launch tms_ts_construction.launch.py task_id:=[登録したtask_id]
+```
+
+```bash
+# Terminal 5 （タスクを開始する緑色のボタンを押す前に実行すること）
 ros2 launch traj_follow_plotter traj_follow_record.launch.py
 ```
