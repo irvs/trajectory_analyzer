@@ -204,9 +204,39 @@ ros2 launch traj_follow_plotter visualize_correspondence.launch.py csv_dir:=path
 
 シミュレータ（OperaSim-PhysX）で動作させた油圧ショベルの軌跡を記録することができます。
 
-1. ros2_tms_for_constructionとtms_if_for_operaを`feature/subtask_for_excavator`ブランチに切り替える。
+1. ros2_tms_for_constructionとtms_if_for_operaを`feature/primitive`ブランチに切り替える。
 
-2. ワークスペースをビルドする。
+2. `tms_ts/tms_ts_launch/tms_ts_construction.launch.py`の`primitive_excavator_change_pose_execute_from_plan_retime`のコメントアウトを外す。（新たな別のlaunchファイルとしてコピーしてから修正することを推奨します）
+```xml
+Node(
+    package='tms_ts_primitive',
+    executable='primitive_excavator_change_pose_execute_from_plan_retime',
+    output='screen',
+    parameters = [{'use_sim_time': LaunchConfiguration('use_sim_time')}],
+    namespace = 'zx200'),
+```
+
+3. tms_ts/tms_ts_primitiveの`CMakeLists.txt`の以下のコメントアウトを外す。
+```xml
+find_package(traj_recorder_msgs REQUIRED)
+
+add_executable(primitive_excavator_change_pose_execute_from_plan_retime src/Excavator/
+
+set(TARGETS
+    ...
+    primitive_excavator_change_pose_execute_from_plan_retime.cpp)
+    ...
+)
+
+ament_target_dependencies(primitive_excavator_change_pose_execute_from_plan_retime
+  srdfdom
+  moveit_core
+  moveit_ros_planning
+  traj_recorder_msgs
+)
+```
+
+4. ワークスペースをビルドする。
 
 ```bash
 cd ~/ros2-tms-for-construction_ws
@@ -215,13 +245,13 @@ colcon build
 source install/setup.bash
 ```
 
-3. タスクを登録する。
+5. タスクを登録する。動作を解析するには`primitive_excavator_change_pose_execute_from_plan_retime`で油圧ショベルを動かす必要があります。
 
 ```bash
-ros2 run tms_ts_manager task_generator.py --ros-args -p bt_tree_xml_file_name:=ExcavateRelease_combined_1_23.xml
+ros2 run tms_ts_manager task_generator.py --ros-args -p bt_tree_xml_file_name:=<task_name>
 ```
 
-4. シミュレータを再生し、以下のコマンドを実行して掘削動作の軌道を記録する。
+6. シミュレータを再生し、以下のコマンドを実行して掘削動作の軌道を記録する。
 
 ```bash
 # Terminal 1
