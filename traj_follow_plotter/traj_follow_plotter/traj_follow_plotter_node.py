@@ -29,9 +29,8 @@ import matplotlib.pyplot as plt
 
 import asyncio
 
-# ★あなたのAction定義に合わせて import してください
-# 例: package名が traj_recorder_msgs の場合
-from traj_recorder_msgs.action import TrajFollow
+# from traj_recorder_msgs.action import TrajFollow
+from tms_msg_ts.action import AnalyzeTrajectory
 
 # ===== 共通モジュールをインポート =====
 from .trajectory_analyzer import (
@@ -111,8 +110,8 @@ class TrajFollowRecordActionServer(Node):
         # ---- Action Server ----
         self._action_srv = ActionServer(
             self,
-            TrajFollow,
-            "traj_follow_record",
+            AnalyzeTrajectory,
+            "analyze_trajectory",
             execute_callback=self.execute_cb,
             goal_callback=self.goal_cb,
             cancel_callback=self.cancel_cb,
@@ -205,7 +204,7 @@ class TrajFollowRecordActionServer(Node):
     # Action callbacks
     # ---------------------------
 
-    def goal_cb(self, goal_request: TrajFollow.Goal):
+    def goal_cb(self, goal_request: AnalyzeTrajectory.Goal):
         self.get_logger().info("goal_cb called")
         if self._goal_handle is not None:
             self.get_logger().info("Another goal is active; rejecting new goal.")
@@ -237,7 +236,7 @@ class TrajFollowRecordActionServer(Node):
         if self._record_bag_all:
             self._start_bag_record_all()
 
-        fb = TrajFollow.Feedback()
+        fb = AnalyzeTrajectory.Feedback()
         fb.status = f"recording: {self.topic}"
         goal_handle.publish_feedback(fb)
 
@@ -263,7 +262,7 @@ class TrajFollowRecordActionServer(Node):
 
         ok, msg = self._finalize_and_save()
 
-        result = TrajFollow.Result()
+        result = AnalyzeTrajectory.Result()
         result.ok = bool(ok)
 
         self.get_logger().info(msg)
@@ -299,7 +298,7 @@ class TrajFollowRecordActionServer(Node):
             return [self._to_plain(v) for v in obj]
         return obj
 
-    def _save_plan_yaml(self, goal_msg: TrajFollow.Goal):
+    def _save_plan_yaml(self, goal_msg: AnalyzeTrajectory.Goal):
         data = {
             "time_scaling": [float(x) for x in goal_msg.time_scaling],
             "velocity_scaling": [float(x) for x in goal_msg.velocity_scaling],
