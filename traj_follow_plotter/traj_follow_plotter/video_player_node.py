@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CSVデータを読み込んでJointStateを再生するシンプルなノード（2台のバックホウ）
+CSVデータを読み込んでJointStateを再生しビデオを作成するノード
 ref (青): Plan目標値
 fb (緑): Feedback実測値
 """
@@ -17,7 +17,7 @@ from tf2_ros import TransformException
 
 
 class VideoPlayerNode(Node):
-    """CSVからJointStateを再生（2台：ref/fb）"""
+    """CSVからJointStateを再生しビデオを作成する"""
     
     def __init__(self):
         super().__init__("video_player_node")
@@ -28,12 +28,14 @@ class VideoPlayerNode(Node):
         self.declare_parameter("loop", False)
         self.declare_parameter("start_delay", 0.0)  # 再生開始の遅延時間
         self.declare_parameter("robot_namespace", "")  # namespace対応
+        self.declare_parameter("force_loop_duration", 30.0)  # 強制ループまでの時間（秒）
         
         csv_path = str(self.get_parameter("csv_path").value)
         playback_speed = float(self.get_parameter("playback_speed").value)
         self.loop = bool(self.get_parameter("loop").value)
         start_delay = float(self.get_parameter("start_delay").value)
         robot_namespace = str(self.get_parameter("robot_namespace").value)
+        self.force_loop_duration = float(self.get_parameter("force_loop_duration").value)
         
         # namespace用のプレフィックス（空の場合は空文字列、あればスラッシュ付き）
         self.ns_prefix = f"{robot_namespace}/" if robot_namespace else ""
@@ -96,6 +98,7 @@ class VideoPlayerNode(Node):
         # データ読み込み
         self.data = self._load_csv(csv_path)
         self.frame_idx = 0
+        self.playback_start_timestamp = None  # 再生開始時刻
         
         # タイマー（30fps）
         timer_period = (1.0 / 30.0) / playback_speed
@@ -107,6 +110,7 @@ class VideoPlayerNode(Node):
             self.timer = None
         else:
             self.timer = self.create_timer(timer_period, self.publish_frame)
+            self.playback_start_timestamp = self.get_clock().now()
         
         self.timer_period = timer_period
         self.get_logger().info(f"Loaded {len(self.data)} frames from {csv_path}")
@@ -542,16 +546,34 @@ class VideoPlayerNode(Node):
     
     def publish_frame(self):
         """1フレーム分のJointStateを配信（2台：ref/fb）"""
-        if self.frame_idx >= len(self.data):
+        # 初回実行時に開始時刻を記録（start_delayがある場合等に対応）
+        if self.playback_start_timestamp is None:
+            self.playback_start_timestamp = self.get_clock().now()
+
+        # 経過時間をチェック
+        elapsed = (self.get_clock().now() - self.playback_start_timestamp).nanoseconds / 1e9
+        is_timeout = self.force_loop_duration > 0 and elapsed >= self.force_loop_duration
+
+        if self.frame_idx >= len(self.data) or is_timeout:
             if self.loop:
                 # ループ時にPathと履歴をリセット
                 self.path_ref.poses.clear()
                 self.path_fb.poses.clear()
                 self.fb_trajectory_history.clear()  # ★履歴もリセット
-                self.get_logger().info("Looping playback... (Path and history reset)")
+                
+                if is_timeout:
+                    self.get_logger().info(f"Force looping playback due to duration timeout ({self.force_loop_duration}s)...")
+                else:
+                    self.get_logger().info("Looping playback... (Path and history reset)")
+                
                 self.frame_idx = 0
+                self.playback_start_timestamp = self.get_clock().now()  # 再開始時刻を更新
             else:
-                self.get_logger().info("Playback finished")
+                if is_timeout:
+                    self.get_logger().info(f"Playback finished (Forced stop after {self.force_loop_duration}s)")
+                else:
+                    self.get_logger().info("Playback finished")
+                
                 self.timer.cancel()
                 # 3秒待ってからシャットダウン
                 import time

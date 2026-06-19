@@ -200,7 +200,7 @@ def generate_nodes(context, *args, **kwargs):
         parameters=[{
             'csv_path': csv_file,
             'playback_speed': playback_speed,
-            'loop': False if record.lower() == 'true' else True,
+            'loop': True,
             'robot_namespace': robot_namespace
         }],
         remappings=[
