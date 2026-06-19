@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+"""
+既存のdata.csvにEE（End Effector）位置を計算して追加するスクリプト
+"""
 import argparse
 import math
 import sys
