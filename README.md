@@ -26,6 +26,17 @@ sudo apt install -y ffmpeg xvfb
 pip3 install matplotlib scipy numpy
 ```
 
+Install `kdl_parser` from source and apply a patch to fix joint parsing:
+
+```bash
+cd ~/ros2-tms-for-construction_ws/src/trajectory_analyzer
+git clone https://github.com/jvytee/kdl_parser.git
+pip install ./kdl_parser --user
+
+# Apply patch to fix joint parsing in kdl_parser
+sed -i "53,56c\    fixed = lambda j,F: kdl.Joint(\n        j.name,\n        getattr(kdl.Joint, 'None', getattr(kdl.Joint, 'NoneJoint', getattr(kdl.Joint, 'Fixed', 0)))\n    )" $(python3 -c "import kdl_parser; print(kdl_parser.__path__[0])")/urdf.py
+```
+
 ### 3. Build
 Build the workspace from the root directory.
 
@@ -57,11 +68,12 @@ If the actual trajectory is not displayed, the `data.csv` in the run directory m
 ```bash
 cd ~/ros2-tms-for-construction_ws
 source install/setup.bash
-python3 src/traj_follow_measurement/traj_follow_plotter/scripts/add_ee_to_csv.py /path/to/data.csv
+python3 src/trajectory_analyzer/traj_follow_plotter/scripts/add_ee_to_csv.py /path/to/data.csv
 ```
 
 ### RViz Display (Verification only, no MP4 generation)
 Displays RViz on the current screen. Used for debugging or verification without recording.
+By default, the playback loops when the trajectory ends or after 30 seconds have passed.
 
 ```bash
 ros2 launch traj_follow_plotter video_generation.launch.py record:=false data_dir:=path/to/run_dir
@@ -78,7 +90,7 @@ ros2 launch traj_follow_plotter visualize_correspondence.launch.py csv_dir:=path
 
 You can record the trajectory of a hydraulic excavator operated in a simulator (OperaSim-PhysX).
 
-1. Switch `ros2_tms_for_construction` and `tms_if_for_opera` to the `feature/subtask_for_excavator` branch.
+1. Switch `ros2_tms_for_construction` and `tms_if_for_opera` to the `feature/primitive` branch.
 
 2. Build the workspace.
 
@@ -89,10 +101,16 @@ colcon build
 source install/setup.bash
 ```
 
-3. Register the task.
+3. Create and register a task using Groot. To analyze the motion, you need to operate the excavator using `primitive_excavator_change_pose_execute_from_plan_retime`.
 
 ```bash
-ros2 run tms_ts_manager task_generator.py --ros-args -p bt_tree_xml_file_name:=ExcavateRelease_combined_1_23.xml
+# Path to Groot might vary
+./build/groot/Groot
+```
+
+```bash
+colcon build
+ros2 run tms_ts_manager task_generator.py --ros-args -p bt_tree_xml_file_name:=<task_name> # without ".xml"
 ```
 
 4. Play the simulator and run the following commands to record the trajectory of the excavation operation.
@@ -152,6 +170,17 @@ sudo apt install -y ffmpeg xvfb
 pip3 install matplotlib scipy numpy
 ```
 
+ソースから `kdl_parser` をインストールし、ジョイントのパースを修正するパッチを適用します。
+
+```bash
+cd ~/ros2-tms-for-construction_ws/src/trajectory_analyzer
+git clone https://github.com/jvytee/kdl_parser.git
+pip install ./kdl_parser --user
+
+# kdl_parserのジョイントパース修正パッチを適用
+sed -i "53,56c\    fixed = lambda j,F: kdl.Joint(\n        j.name,\n        getattr(kdl.Joint, 'None', getattr(kdl.Joint, 'NoneJoint', getattr(kdl.Joint, 'Fixed', 0)))\n    )" $(python3 -c "import kdl_parser; print(kdl_parser.__path__[0])")/urdf.py
+```
+
 ### 3. ビルド
 ワークスペースのルートでビルドを行います。
 
@@ -183,11 +212,12 @@ ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=path/to/run
 ```bash
 cd ~/ros2-tms-for-construction_ws
 source install/setup.bash
-python3 src/traj_follow_measurement/traj_follow_plotter/scripts/add_ee_to_csv.py /path/to/data.csv
+python3 src/trajectory_analyzer/traj_follow_plotter/scripts/add_ee_to_csv.py /path/to/data.csv
 ```
 
 ### RViz表示（MP4生成なし・確認のみ）
 現在のディスプレイを使用してRVizを表示します。デバッグや録画なしでの確認に使用します。
+デフォルトでは軌道が終わるか再生から30秒経過で再生がループします。
 
 ```bash
 ros2 launch traj_follow_plotter video_generation.launch.py record:=false data_dir:=path/to/run_dir
@@ -206,37 +236,7 @@ ros2 launch traj_follow_plotter visualize_correspondence.launch.py csv_dir:=path
 
 1. ros2_tms_for_constructionとtms_if_for_operaを`feature/primitive`ブランチに切り替える。
 
-2. `tms_ts/tms_ts_launch/tms_ts_construction.launch.py`の`primitive_excavator_change_pose_execute_from_plan_retime`のコメントアウトを外す。（新たな別のlaunchファイルとしてコピーしてから修正することを推奨します）
-```xml
-Node(
-    package='tms_ts_primitive',
-    executable='primitive_excavator_change_pose_execute_from_plan_retime',
-    output='screen',
-    parameters = [{'use_sim_time': LaunchConfiguration('use_sim_time')}],
-    namespace = 'zx200'),
-```
-
-3. tms_ts/tms_ts_primitiveの`CMakeLists.txt`の以下のコメントアウトを外す。
-```xml
-find_package(traj_recorder_msgs REQUIRED)
-
-add_executable(primitive_excavator_change_pose_execute_from_plan_retime src/Excavator/
-
-set(TARGETS
-    ...
-    primitive_excavator_change_pose_execute_from_plan_retime.cpp)
-    ...
-)
-
-ament_target_dependencies(primitive_excavator_change_pose_execute_from_plan_retime
-  srdfdom
-  moveit_core
-  moveit_ros_planning
-  traj_recorder_msgs
-)
-```
-
-4. ワークスペースをビルドする。
+2. ワークスペースをビルドする。
 
 ```bash
 cd ~/ros2-tms-for-construction_ws
@@ -245,13 +245,18 @@ colcon build
 source install/setup.bash
 ```
 
-5. タスクを登録する。動作を解析するには`primitive_excavator_change_pose_execute_from_plan_retime`で油圧ショベルを動かす必要があります。
+3. Grootでタスクを作成して登録する。動作を解析するには`primitive_excavator_change_pose_execute_from_plan_retime`で油圧ショベルを動かす必要があります。
 
 ```bash
-ros2 run tms_ts_manager task_generator.py --ros-args -p bt_tree_xml_file_name:=<task_name>
+./build/groot/Groot
 ```
 
-6. シミュレータを再生し、以下のコマンドを実行して掘削動作の軌道を記録する。
+```bash
+colcon build
+ros2 run tms_ts_manager task_generator.py --ros-args -p bt_tree_xml_file_name:=<task_name> # without ".xml"
+```
+
+4. シミュレータを再生し、以下のコマンドを実行して掘削動作の軌道を記録する。
 
 ```bash
 # Terminal 1
