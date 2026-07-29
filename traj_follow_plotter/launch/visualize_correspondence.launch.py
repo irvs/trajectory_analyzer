@@ -15,10 +15,10 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('traj_follow_plotter')
     
     # Launch引数
-    csv_dir_arg = DeclareLaunchArgument(
-        'csv_dir',
+    data_dir_arg = DeclareLaunchArgument(
+        'data_dir',
         default_value='',
-        description='Directory containing link_correspondence_nearest.csv'
+        description='Directory containing data.csv and link_correspondence_nearest.csv'
     )
     
     rviz_config_arg = DeclareLaunchArgument(
@@ -34,7 +34,7 @@ def generate_launch_description():
         name='visualize_correspondence_node',
         output='screen',
         parameters=[{
-            'csv_dir': LaunchConfiguration('csv_dir'),
+            'csv_dir': LaunchConfiguration('data_dir'),
         }]
     )
     
@@ -48,7 +48,7 @@ def generate_launch_description():
     )
     
     return LaunchDescription([
-        csv_dir_arg,
+        data_dir_arg,
         rviz_config_arg,
         visualize_node,
         rviz_node,
