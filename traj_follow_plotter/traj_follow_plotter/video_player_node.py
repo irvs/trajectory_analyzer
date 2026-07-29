@@ -14,13 +14,15 @@ from geometry_msgs.msg import PoseStamped
 from visualization_msgs.msg import Marker, MarkerArray
 import tf2_ros
 from tf2_ros import TransformException
+import pymongo
 
 
 class VideoPlayerNode(Node):
     """CSVからJointStateを再生しビデオを作成する"""
     
-    def __init__(self):
-        super().__init__("video_player_node")
+    def __init__(self, *args, **kwargs):
+        super().__init__("video_player_node", *args, **kwargs)
+
         
         # パラメータ
         self.declare_parameter("csv_path", "")
@@ -87,6 +89,28 @@ class VideoPlayerNode(Node):
         # Link correspondence データ
         self.link_correspondences = {}
         self._load_link_correspondence_data()
+        
+        # MongoDB 障害物読み込み用パラメータ
+        self.declare_parameter("db_host", "localhost")
+        self.declare_parameter("db_port", 27017)
+        self.declare_parameter("model_name", "zx200")
+        self.declare_parameter("root_record_name", "collision_objects_shimiz")
+        self.declare_parameter("planning_frame", "base_link")
+        
+        db_host = str(self.get_parameter("db_host").value)
+        db_port = int(self.get_parameter("db_port").value)
+        model_name = str(self.get_parameter("model_name").value)
+        root_record_name = str(self.get_parameter("root_record_name").value)
+        planning_frame = str(self.get_parameter("planning_frame").value)
+
+        # 障害物マーカーパブリッシャー
+        self.pub_obstacle_markers = self.create_publisher(MarkerArray, "/video_gen/obstacle_markers", 10)
+        
+        # MongoDBから障害物を読み込んでマーカー作成
+        self.obstacle_markers = MarkerArray()
+        self._load_obstacle_data(db_host, db_port, model_name, root_record_name, planning_frame)
+        if self.obstacle_markers.markers:
+            self.create_timer(1.0, self._publish_obstacle_markers)
         
         # Link correspondence マーカーパブリッシャー
         self.pub_link_correspondence_markers = self.create_publisher(MarkerArray, "/video_gen/link_correspondence_markers", 10)
@@ -348,8 +372,8 @@ class VideoPlayerNode(Node):
             fb_points_marker.scale.x = 0.025
             fb_points_marker.scale.y = 0.025
             fb_points_marker.scale.z = 0.025
-            fb_points_marker.color.r = 0.0
-            fb_points_marker.color.g = 1.0
+            fb_points_marker.color.r = 1.0
+            fb_points_marker.color.g = 0.0
             fb_points_marker.color.b = 0.0
             fb_points_marker.color.a = 0.5
             
@@ -543,8 +567,142 @@ class VideoPlayerNode(Node):
             marker_array.markers.append(stats_text_marker)
         
         self.pub_link_correspondence_markers.publish(marker_array)
-    
+
+    def _load_obstacle_data(self, db_host: str, db_port: int, model_name: str, root_record_name: str, planning_frame: str):
+        """MongoDBから障害物データを読み込んでMarkerArrayを作成"""
+        if not root_record_name:
+            return
+        
+        try:
+            client = pymongo.MongoClient(db_host, db_port, serverSelectionTimeoutMS=2000)
+            db = client["rostmsdb"]
+            collection = db["parameter"]
+            
+            root_doc = collection.find_one({"model_name": model_name, "record_name": root_record_name})
+            if not root_doc:
+                self.get_logger().warn(f"Root obstacle record '{root_record_name}' not found for model '{model_name}'")
+                return
+            
+            record_names = root_doc.get("collision_object_record_names", [])
+            if not record_names:
+                self.get_logger().warn(f"No collision_object_record_names in root obstacle record '{root_record_name}'")
+                return
+            
+            self.get_logger().info(f"Loading {len(record_names)} obstacles from MongoDB (model: '{model_name}', root: '{root_record_name}')...")
+            
+            frame_id = f"{self.ns_prefix}ref/{planning_frame}" if planning_frame else f"{self.ns_prefix}ref/base_link"
+            marker_id = 0
+            
+            for rec_name in record_names:
+                child_doc = collection.find_one({"model_name": model_name, "record_name": rec_name})
+                if not child_doc:
+                    self.get_logger().warn(f"Obstacle child record '{rec_name}' not found in DB.")
+                    continue
+                
+                doc_type = child_doc.get("type")
+                
+                # Pose解析
+                x = float(child_doc.get("x", 0.0))
+                y = float(child_doc.get("y", 0.0))
+                z = float(child_doc.get("z", 0.0))
+                qx = float(child_doc.get("qx", 0.0))
+                qy = float(child_doc.get("qy", 0.0))
+                qz = float(child_doc.get("qz", 0.0))
+                qw = float(child_doc.get("qw", 1.0))
+                
+                if "pose" in child_doc and isinstance(child_doc["pose"], dict):
+                    p = child_doc["pose"].get("position", {})
+                    o = child_doc["pose"].get("orientation", {})
+                    x = float(p.get("x", x))
+                    y = float(p.get("y", y))
+                    z = float(p.get("z", z))
+                    qx = float(o.get("x", qx))
+                    qy = float(o.get("y", qy))
+                    qz = float(o.get("z", qz))
+                    qw = float(o.get("w", qw))
+                
+                marker = Marker()
+                marker.header.frame_id = frame_id
+                marker.ns = "obstacles"
+                marker.id = marker_id
+                marker_id += 1
+                marker.action = Marker.ADD
+                
+                marker.pose.position.x = x
+                marker.pose.position.y = y
+                marker.pose.position.z = z
+                marker.pose.orientation.x = qx
+                marker.pose.orientation.y = qy
+                marker.pose.orientation.z = qz
+                marker.pose.orientation.w = qw
+                
+                if doc_type == "mesh" or "data" in child_doc:
+                    mesh_data = bytes(child_doc["data"])
+                    temp_path = f"/tmp/temp_obstacle_mesh_{rec_name}.dae"
+                    with open(temp_path, "wb") as f:
+                        f.write(mesh_data)
+                    
+                    marker.type = Marker.MESH_RESOURCE
+                    marker.mesh_resource = f"file://{temp_path}"
+                    marker.mesh_use_embedded_materials = True
+                    marker.scale.x = 1.0
+                    marker.scale.y = 1.0
+                    marker.scale.z = 1.0
+                    marker.color.r = 0.0
+                    marker.color.g = 0.8
+                    marker.color.b = 0.0
+                    marker.color.a = 0.8
+                else:
+                    # プリミティブ形状（Box, Sphere, Cylinder）
+                    prim_type = child_doc.get("primitive_type", 1)
+                    dims = child_doc.get("dimensions", [1.0, 1.0, 1.0])
+                    if prim_type == 1:  # BOX
+                        marker.type = Marker.CUBE
+                        marker.scale.x = float(dims[0]) if len(dims) > 0 else 1.0
+                        marker.scale.y = float(dims[1]) if len(dims) > 1 else 1.0
+                        marker.scale.z = float(dims[2]) if len(dims) > 2 else 1.0
+                    elif prim_type == 2:  # SPHERE
+                        marker.type = Marker.SPHERE
+                        r = float(dims[0]) if len(dims) > 0 else 0.5
+                        marker.scale.x = r * 2.0
+                        marker.scale.y = r * 2.0
+                        marker.scale.z = r * 2.0
+                    elif prim_type == 3:  # CYLINDER
+                        marker.type = Marker.CYLINDER
+                        h = float(dims[0]) if len(dims) > 0 else 1.0
+                        r = float(dims[1]) if len(dims) > 1 else 0.5
+                        marker.scale.x = r * 2.0
+                        marker.scale.y = r * 2.0
+                        marker.scale.z = h
+                    else:
+                        marker.type = Marker.CUBE
+                        marker.scale.x = 1.0
+                        marker.scale.y = 1.0
+                        marker.scale.z = 1.0
+                    
+                    marker.color.r = 0.0
+                    marker.color.g = 0.8
+                    marker.color.b = 0.0
+                    marker.color.a = 0.8
+                
+                self.obstacle_markers.markers.append(marker)
+            
+            self.get_logger().info(f"Loaded {len(self.obstacle_markers.markers)} obstacle markers from MongoDB.")
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to load obstacles from MongoDB: {e}")
+
+    def _publish_obstacle_markers(self):
+        """障害物マーカーのタイムスタンプを更新して配信"""
+        if not self.obstacle_markers.markers:
+            return
+        now = self.get_clock().now().to_msg()
+        for marker in self.obstacle_markers.markers:
+            marker.header.stamp = now
+        self.pub_obstacle_markers.publish(self.obstacle_markers)
+
     def publish_frame(self):
+
         """1フレーム分のJointStateを配信（2台：ref/fb）"""
         # 初回実行時に開始時刻を記録（start_delayがある場合等に対応）
         if self.playback_start_timestamp is None:

@@ -58,6 +58,7 @@ def generate_rviz_config(base_config_path, robot_namespace, camera_view, camera_
         config_content = config_content.replace('/video_gen/path_fb', f'/video_gen/{robot_namespace}/path_fb')
         config_content = config_content.replace('/video_gen/plan_ee_markers', f'/video_gen/{robot_namespace}/plan_ee_markers')
         config_content = config_content.replace('/video_gen/comparison_markers', f'/video_gen/{robot_namespace}/comparison_markers')
+        config_content = config_content.replace('/video_gen/obstacle_markers', f'/video_gen/{robot_namespace}/obstacle_markers')
         
         # Grid的参照フレームを最初のロボットに設定
         config_content = config_content.replace('Reference Frame: ref/base_link', f'Reference Frame: {robot_namespace}/ref/base_link')
@@ -83,6 +84,8 @@ def generate_nodes(context, *args, **kwargs):
     record = LaunchConfiguration('record').perform(context)
     playback_speed = float(LaunchConfiguration('playback_speed').perform(context))
     robot_namespace = LaunchConfiguration('robot_namespace').perform(context)
+    model_name = LaunchConfiguration('model_name').perform(context)
+    root_record_name = LaunchConfiguration('root_record_name').perform(context)
     
     # recordがtrueならXvfbを使用、falseなら現在のDISPLAYを使用
     display = ':99' if record.lower() == 'true' else os.environ.get('DISPLAY', ':0')
@@ -201,7 +204,9 @@ def generate_nodes(context, *args, **kwargs):
             'csv_path': csv_file,
             'playback_speed': playback_speed,
             'loop': True,
-            'robot_namespace': robot_namespace
+            'robot_namespace': robot_namespace,
+            'model_name': model_name,
+            'root_record_name': root_record_name
         }],
         remappings=[
             ('/video_gen/joint_states_ref', f'/video_gen/{ns_prefix}/joint_states_ref' if ns_prefix else '/video_gen/joint_states_ref'),
@@ -210,6 +215,7 @@ def generate_nodes(context, *args, **kwargs):
             ('/video_gen/path_fb', f'/video_gen/{ns_prefix}/path_fb' if ns_prefix else '/video_gen/path_fb'),
             ('/video_gen/plan_ee_markers', f'/video_gen/{ns_prefix}/plan_ee_markers' if ns_prefix else '/video_gen/plan_ee_markers'),
             ('/video_gen/comparison_markers', f'/video_gen/{ns_prefix}/comparison_markers' if ns_prefix else '/video_gen/comparison_markers'),
+            ('/video_gen/obstacle_markers', f'/video_gen/{ns_prefix}/obstacle_markers' if ns_prefix else '/video_gen/obstacle_markers'),
         ],
         additional_env={'DISPLAY': display}
     )
@@ -320,6 +326,18 @@ def generate_launch_description():
         description='Camera distance in RViz. Default is 20.0.'
     )
     
+    model_name_arg = DeclareLaunchArgument(
+        'model_name',
+        default_value='zx200',
+        description='Model name for obstacle retrieval in MongoDB.'
+    )
+    
+    root_record_name_arg = DeclareLaunchArgument(
+        'root_record_name',
+        default_value='collision_objects_shimiz',
+        description='Root record name for obstacle retrieval in MongoDB.'
+    )
+    
     return LaunchDescription([
         data_dir_arg,
         record_arg,
@@ -327,5 +345,8 @@ def generate_launch_description():
         robot_namespace_arg,
         camera_view_arg,
         camera_distance_arg,
+        model_name_arg,
+        root_record_name_arg,
         OpaqueFunction(function=generate_nodes)
     ])
+
