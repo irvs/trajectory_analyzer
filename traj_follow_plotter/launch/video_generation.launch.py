@@ -8,6 +8,9 @@ fb (緑): Feedback実測値
   # 仮想ディスプレイで録画（デフォルト、等速再生）
   ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS
 
+  # 複数のrunディレクトリを指定して録画（カンマ区切りまたはスペース区切り）
+  ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run1,/path/to/run2
+
   # 2倍速で録画
   ros2 launch traj_follow_plotter video_generation.launch.py data_dir:=/path/to/run_YYYYMMDD_HHMMSS playback_speed:=2.0
 
@@ -35,6 +38,15 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 import os
 import tempfile
+
+
+def parse_data_dirs(data_dir_str):
+    """カンマやスペース区切りの文字列からディレクトリパスのリストを生成"""
+    if not data_dir_str:
+        return []
+    cleaned = data_dir_str.replace(',', ' ').replace(';', ' ').replace('"', ' ').replace("'", ' ')
+    dirs = [d.strip() for d in cleaned.split() if d.strip()]
+    return dirs
 
 
 def generate_rviz_config(base_config_path, robot_namespace, camera_view, camera_distance):
@@ -80,12 +92,16 @@ def generate_rviz_config(base_config_path, robot_namespace, camera_view, camera_
 
 def generate_nodes(context, *args, **kwargs):
     """条件に応じてノードを生成"""
-    data_dir = LaunchConfiguration('data_dir').perform(context)
+    data_dir_param = LaunchConfiguration('data_dir').perform(context)
     record = LaunchConfiguration('record').perform(context)
     playback_speed = float(LaunchConfiguration('playback_speed').perform(context))
     robot_namespace = LaunchConfiguration('robot_namespace').perform(context)
     model_name = LaunchConfiguration('model_name').perform(context)
     root_record_name = LaunchConfiguration('root_record_name').perform(context)
+    
+    data_dirs = parse_data_dirs(data_dir_param)
+    if not data_dirs:
+        raise ValueError("No valid directory specified in data_dir argument.")
     
     # recordがtrueならXvfbを使用、falseなら現在のDISPLAYを使用
     display = ':99' if record.lower() == 'true' else os.environ.get('DISPLAY', ':0')
@@ -96,8 +112,10 @@ def generate_nodes(context, *args, **kwargs):
         'meshes',
         'zx200_video.xacro'
     ])
-    csv_file = os.path.join(data_dir, 'data.csv')
-    output_video = os.path.join(data_dir, 'animation.mp4')
+    
+    # 動画保存先は最初の指定ディレクトリ
+    output_video = os.path.join(data_dirs[0], 'animation.mp4')
+    csv_paths_str = ",".join([os.path.join(d, 'data.csv') if not d.endswith('.csv') else d for d in data_dirs])
     
     # RViz設定ファイルのパス
     base_rviz_config = os.path.join(
@@ -201,7 +219,8 @@ def generate_nodes(context, *args, **kwargs):
         name=f'video_player_node_{robot_namespace}' if robot_namespace else 'video_player_node',
         output='screen',
         parameters=[{
-            'csv_path': csv_file,
+            'csv_path': csv_paths_str,
+            'data_dir': ",".join(data_dirs),
             'playback_speed': playback_speed,
             'loop': True,
             'robot_namespace': robot_namespace,
@@ -293,7 +312,7 @@ def generate_launch_description():
     # 引数
     data_dir_arg = DeclareLaunchArgument(
         'data_dir',
-        description='Path to recorded data directory'
+        description='Path to recorded data directory (or multiple directories separated by comma/space)'
     )
     
     record_arg = DeclareLaunchArgument(
@@ -349,4 +368,5 @@ def generate_launch_description():
         root_record_name_arg,
         OpaqueFunction(function=generate_nodes)
     ])
+
 

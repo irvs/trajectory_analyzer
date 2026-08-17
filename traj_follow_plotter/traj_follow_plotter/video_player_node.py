@@ -22,29 +22,37 @@ class VideoPlayerNode(Node):
     
     def __init__(self, *args, **kwargs):
         super().__init__("video_player_node", *args, **kwargs)
-
         
         # パラメータ
         self.declare_parameter("csv_path", "")
+        self.declare_parameter("data_dir", "")
         self.declare_parameter("playback_speed", 1.0)
         self.declare_parameter("loop", False)
         self.declare_parameter("start_delay", 0.0)  # 再生開始の遅延時間
         self.declare_parameter("robot_namespace", "")  # namespace対応
-        self.declare_parameter("force_loop_duration", 30.0)  # 強制ループまでの時間（秒）
+        self.declare_parameter("force_loop_duration", 30.0)  # 強制ループまでの基本時間（秒）
         
-        csv_path = str(self.get_parameter("csv_path").value)
+        csv_path_param = str(self.get_parameter("csv_path").value)
+        data_dir_param = str(self.get_parameter("data_dir").value)
         playback_speed = float(self.get_parameter("playback_speed").value)
         self.loop = bool(self.get_parameter("loop").value)
         start_delay = float(self.get_parameter("start_delay").value)
         robot_namespace = str(self.get_parameter("robot_namespace").value)
-        self.force_loop_duration = float(self.get_parameter("force_loop_duration").value)
+        base_force_loop_duration = float(self.get_parameter("force_loop_duration").value)
+        
+        # 対象ディレクトリリストを解析
+        self.dir_list = self._parse_dir_list(data_dir_param, csv_path_param)
+        if not self.dir_list:
+            self.get_logger().error(f"No valid data directories found from csv_path='{csv_path_param}', data_dir='{data_dir_param}'")
+            raise FileNotFoundError("No valid data directories specified")
+        
+        # 強制ループまでの時間は指定したディレクトリの数だけ倍にする
+        self.force_loop_duration = base_force_loop_duration * len(self.dir_list)
+        self.get_logger().info(f"Target directories ({len(self.dir_list)}): {self.dir_list}")
+        self.get_logger().info(f"Force loop duration set to {self.force_loop_duration}s ({base_force_loop_duration}s x {len(self.dir_list)} dirs)")
         
         # namespace用のプレフィックス（空の場合は空文字列、あればスラッシュ付き）
         self.ns_prefix = f"{robot_namespace}/" if robot_namespace else ""
-        
-        if not csv_path or not os.path.exists(csv_path):
-            self.get_logger().error(f"CSV file not found: {csv_path}")
-            raise FileNotFoundError(csv_path)
         
         # URDFの関節名（ベース名）
         # bucket_end_jointは実際には使われないため除外
@@ -119,13 +127,13 @@ class VideoPlayerNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
-        # データ読み込み
-        self.data = self._load_csv(csv_path)
+        # データ読み込み（全ディレクトリのdata.csvを連結）
+        self.data = self._load_all_csv_data()
         self.frame_idx = 0
         self.playback_start_timestamp = None  # 再生開始時刻
         
         # タイマー（30fps）
-        timer_period = (1.0 / 30.0) / playback_speed
+        timer_period = (1.0 / 57.0) / playback_speed
         
         # 遅延がある場合は、遅延後にタイマーを開始
         if start_delay > 0:
@@ -137,57 +145,82 @@ class VideoPlayerNode(Node):
             self.playback_start_timestamp = self.get_clock().now()
         
         self.timer_period = timer_period
-        self.get_logger().info(f"Loaded {len(self.data)} frames from {csv_path}")
         self.get_logger().info(f"Playback speed: {playback_speed}x, Loop: {self.loop}")
     
-    def _load_csv(self, csv_path: str):
-        """CSVからデータ読み込み"""
-        data = []
-        with open(csv_path, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                data.append(row)
-        return data
-    
-    def _load_plan_ee_data(self):
-        """plan.csvからPlanのEE位置データを読み込み"""
-        csv_path = str(self.get_parameter("csv_path").value)
-        if not csv_path or not os.path.exists(csv_path):
-            return
+    def _parse_dir_list(self, data_dir_param: str, csv_path_param: str):
+        """パラメータから対象ディレクトリのリストを抽出"""
+        raw_str = data_dir_param if data_dir_param else csv_path_param
+        if not raw_str:
+            return []
         
-        # plan.csvのパスを推定（data.csvと同じディレクトリ）
-        csv_dir = os.path.dirname(csv_path)
-        plan_csv_path = os.path.join(csv_dir, "plan.csv")
+        cleaned = raw_str.replace(',', ' ').replace(';', ' ')
+        tokens = [t.strip() for t in cleaned.split() if t.strip()]
         
-        if not os.path.exists(plan_csv_path):
-            self.get_logger().warn(f"plan.csv not found: {plan_csv_path}")
-            return
-        
-        self.plan_ee_positions = []
-        try:
-            with open(plan_csv_path, 'r') as f:
+        dir_list = []
+        for token in tokens:
+            if os.path.isfile(token):
+                dir_path = os.path.dirname(token)
+            else:
+                dir_path = token
+            if dir_path and dir_path not in dir_list:
+                dir_list.append(dir_path)
+        return dir_list
+
+    def _load_all_csv_data(self):
+        """指定された全ディレクトリのdata.csvを順番に連結して読み込み"""
+        all_data = []
+        for run_dir in self.dir_list:
+            csv_path = os.path.join(run_dir, "data.csv") if not run_dir.endswith(".csv") else run_dir
+            if not os.path.exists(csv_path):
+                self.get_logger().error(f"CSV file not found: {csv_path}")
+                continue
+            
+            count = 0
+            with open(csv_path, 'r') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    # PlanのEE位置を読み込み
-                    if 'ee_x' in row and 'ee_y' in row and 'ee_z' in row:
-                        try:
-                            x = float(row['ee_x'])
-                            y = float(row['ee_y'])
-                            z = float(row['ee_z'])
-                            # nanでない場合のみ追加
-                            if not (x != x or y != y or z != z):  # nanチェック
-                                self.plan_ee_positions.append((x, y, z))
-                        except (ValueError, KeyError):
-                            continue
+                    all_data.append(row)
+                    count += 1
+            self.get_logger().info(f"Loaded {count} frames from {csv_path}")
+        
+        if not all_data:
+            self.get_logger().error(f"No CSV data loaded from directories: {self.dir_list}")
+            raise FileNotFoundError(f"No CSV data found in {self.dir_list}")
+        
+        self.get_logger().info(f"Total loaded {len(all_data)} frames from {len(self.dir_list)} directories")
+        return all_data
+    
+    def _load_plan_ee_data(self):
+        """全ディレクトリのplan.csvからPlanのEE位置データを読み込み"""
+        self.plan_ee_positions = []
+        for run_dir in self.dir_list:
+            plan_csv_path = os.path.join(run_dir, "plan.csv")
+            if not os.path.exists(plan_csv_path):
+                self.get_logger().warn(f"plan.csv not found in {run_dir}")
+                continue
             
-            if self.plan_ee_positions:
-                self.get_logger().info(f"Loaded {len(self.plan_ee_positions)} plan EE positions from {plan_csv_path}")
-                # PlanのEE位置マーカーを配信するタイマー（1秒ごと）
-                self.create_timer(1.0, self._publish_plan_markers)
-            else:
-                self.get_logger().warn("No plan EE positions found in plan.csv")
-        except Exception as e:
-            self.get_logger().warn(f"Failed to load plan EE data: {e}")
+            count = 0
+            try:
+                with open(plan_csv_path, 'r') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if 'ee_x' in row and 'ee_y' in row and 'ee_z' in row:
+                            try:
+                                x = float(row['ee_x'])
+                                y = float(row['ee_y'])
+                                z = float(row['ee_z'])
+                                if not (x != x or y != y or z != z):
+                                    self.plan_ee_positions.append((x, y, z))
+                                    count += 1
+                            except (ValueError, KeyError):
+                                continue
+                self.get_logger().info(f"Loaded {count} plan EE positions from {plan_csv_path}")
+            except Exception as e:
+                self.get_logger().warn(f"Failed to load plan EE data from {plan_csv_path}: {e}")
+        
+        if self.plan_ee_positions:
+            self.get_logger().info(f"Total loaded {len(self.plan_ee_positions)} plan EE positions from {len(self.dir_list)} directories")
+            self.create_timer(1.0, self._publish_plan_markers)
     
     def _publish_plan_markers(self):
         """PlanのEE位置をマーカーとして配信（namespace対応）"""
@@ -251,61 +284,47 @@ class VideoPlayerNode(Node):
         self.pub_plan_markers.publish(marker_array)
     
     def _load_link_correspondence_data(self):
-        """link_correspondence_nearest.csvからPlan-Feedback対応点を読み込み"""
-        csv_path = str(self.get_parameter("csv_path").value)
-        if not csv_path or not os.path.exists(csv_path):
-            return
-        
-        # link_correspondence_nearest.csvのパスを推定
-        csv_dir = os.path.dirname(csv_path)
-        correspondence_csv_path = os.path.join(csv_dir, "link_correspondence_nearest.csv")
-        
-        if not os.path.exists(correspondence_csv_path):
-            self.get_logger().warn(f"link_correspondence_nearest.csv not found: {correspondence_csv_path}")
-            return
-        
-        # リンクごとにデータを格納
-        # self.link_correspondences[link_name] = [(plan_pos, fb_pos, distance), ...]
+        """全ディレクトリのlink_correspondence_nearest.csvからPlan-Feedback対応点を読み込み"""
         self.link_correspondences = {}
-        
-        try:
-            with open(correspondence_csv_path, 'r') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    link_name = row['link_name']
-                    
-                    plan_pos = (
-                        float(row['plan_x']),
-                        float(row['plan_y']),
-                        float(row['plan_z'])
-                    )
-                    
-                    fb_pos = (
-                        float(row['fb_nearest_x']),
-                        float(row['fb_nearest_y']),
-                        float(row['fb_nearest_z'])
-                    )
-                    
-                    distance = float(row['distance_m'])
-                    
-                    if link_name not in self.link_correspondences:
-                        self.link_correspondences[link_name] = []
-                    
-                    self.link_correspondences[link_name].append((plan_pos, fb_pos, distance))
+        for run_dir in self.dir_list:
+            correspondence_csv_path = os.path.join(run_dir, "link_correspondence_nearest.csv")
+            if not os.path.exists(correspondence_csv_path):
+                self.get_logger().warn(f"link_correspondence_nearest.csv not found in {run_dir}")
+                continue
             
-            if self.link_correspondences:
-                total_points = sum(len(corr) for corr in self.link_correspondences.values())
-                self.get_logger().info(f"Loaded {total_points} correspondence points for {len(self.link_correspondences)} links")
-                
-                # Link correspondence マーカーを定期的に配信（1秒ごと）
-                self.create_timer(1.0, self._publish_link_correspondence_markers)
-            else:
-                self.get_logger().warn("No correspondence data found")
-                
-        except Exception as e:
-            self.get_logger().warn(f"Failed to load link correspondence data: {e}")
-            import traceback
-            traceback.print_exc()
+            try:
+                with open(correspondence_csv_path, 'r') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        link_name = row['link_name']
+                        
+                        plan_pos = (
+                            float(row['plan_x']),
+                            float(row['plan_y']),
+                            float(row['plan_z'])
+                        )
+                        
+                        fb_pos = (
+                            float(row['fb_nearest_x']),
+                            float(row['fb_nearest_y']),
+                            float(row['fb_nearest_z'])
+                        )
+                        
+                        distance = float(row['distance_m'])
+                        
+                        if link_name not in self.link_correspondences:
+                            self.link_correspondences[link_name] = []
+                        
+                        self.link_correspondences[link_name].append((plan_pos, fb_pos, distance))
+            except Exception as e:
+                self.get_logger().warn(f"Failed to load link correspondence data from {correspondence_csv_path}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        if self.link_correspondences:
+            total_points = sum(len(corr) for corr in self.link_correspondences.values())
+            self.get_logger().info(f"Total loaded {total_points} correspondence points for {len(self.link_correspondences)} links across {len(self.dir_list)} directories")
+            self.create_timer(1.0, self._publish_link_correspondence_markers)
     
     def _publish_link_correspondence_markers(self):
         """Link correspondenceをマーカーとして可視化（矢印で誤差ベクトル表示）"""
