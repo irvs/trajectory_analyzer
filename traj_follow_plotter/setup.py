@@ -33,6 +33,7 @@ setup(
             'generate_rviz_config = traj_follow_plotter.generate_rviz_config:main',
             'post_analysis = traj_follow_plotter.post_process_analysis:main',
             'visualize_correspondence_node = traj_follow_plotter.visualize_correspondence_node:main',
+            'analysis_plotter = traj_follow_plotter.analysis_plotter_node:main',
         ],
     },
 )
