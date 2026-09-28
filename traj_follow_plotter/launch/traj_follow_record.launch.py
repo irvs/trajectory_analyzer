@@ -42,6 +42,16 @@ def generate_launch_description():
         default_value='true',
         description='Record all topics with rosbag'
     )
+
+    recording_mode_arg = DeclareLaunchArgument(
+        'recording_mode',
+        default_value='full',
+        description=(
+            "Recording behavior: 'full' (record & save as usual), "
+            "'no_process' (action accepts goals but performs no recording), "
+            "'no_save' (state/FK processing runs but no folder or file is created)"
+        )
+    )
     
     urdf_path_arg = DeclareLaunchArgument(
         'urdf_path',
@@ -72,6 +82,7 @@ def generate_launch_description():
             'state_topic': LaunchConfiguration('state_topic'),
             'output_root': LaunchConfiguration('output_root'),
             'record_bag_all': LaunchConfiguration('record_bag_all'),
+            'recording_mode': LaunchConfiguration('recording_mode'),
             'urdf_path': LaunchConfiguration('urdf_path'),
             'fk_base_link': LaunchConfiguration('fk_base_link'),
             'fk_tip_link': LaunchConfiguration('fk_tip_link'),
@@ -83,6 +94,7 @@ def generate_launch_description():
         state_topic_arg,
         output_root_arg,
         record_bag_arg,
+        recording_mode_arg,
         urdf_path_arg,
         fk_base_link_arg,
         fk_tip_link_arg,

@@ -62,21 +62,30 @@ class RecordingContext:
     """
     1つのアクションゴール（計測）に関するデータと状態を保持するクラス
     """
-    def __init__(self, goal_id: str, topic: str, out_dir: str):
+    def __init__(self, goal_id: str, topic: str, out_dir: Optional[str], save_files: bool = True):
         self.goal_id = goal_id
         self.topic = topic
         self.out_dir = out_dir
-        
+        # False の場合、フォルダ作成・ファイル保存（bag含む）を一切行わない
+        self.save_files = save_files
+
         self.started = False
         self.start_time: Optional[float] = None
         self.dt_est = 0.02
 
-        # 出力ファイルパス
-        self.out_png = os.path.join(out_dir, "plot.png")
-        self.out_csv = os.path.join(out_dir, "data.csv")
-        self.out_plan = os.path.join(out_dir, "plan.yaml")
-        self.out_plan_csv = os.path.join(out_dir, "plan.csv")
-        self.bag_dir = os.path.join(out_dir, "bag")
+        # 出力ファイルパス（save_files=False の場合は out_dir が None のため未使用）
+        if out_dir is not None:
+            self.out_png = os.path.join(out_dir, "plot.png")
+            self.out_csv = os.path.join(out_dir, "data.csv")
+            self.out_plan = os.path.join(out_dir, "plan.yaml")
+            self.out_plan_csv = os.path.join(out_dir, "plan.csv")
+            self.bag_dir = os.path.join(out_dir, "bag")
+        else:
+            self.out_png = None
+            self.out_csv = None
+            self.out_plan = None
+            self.out_plan_csv = None
+            self.bag_dir = None
 
         # バッファ
         self.t: List[float] = []
@@ -138,6 +147,12 @@ class TrajFollowRecordActionServer(Node):
         self.declare_parameter("state_topic", "/zx200/upper_arm_controller/controller_state")
         self.declare_parameter("output_root", os.path.normpath(default_output))
         self.declare_parameter("record_bag_all", True)
+
+        # ===== 記録モード =====
+        # full       : 通常どおり記録・保存する（デフォルト）
+        # no_process : アクションは作成しリクエストは受け付けるが、記録処理は一切行わない
+        # no_save    : 状態の収集・FK計算などの処理は行うが、フォルダ作成やファイル保存は行わない
+        self.declare_parameter("recording_mode", "full")
 
         # ===== FK/URDF パラメータ =====
         self.declare_parameter("urdf_path", os.path.normpath(default_urdf))
@@ -224,10 +239,22 @@ class TrajFollowRecordActionServer(Node):
         goal_id = str(goal_handle.goal_id.uuid)
         self.get_logger().info(f"Executing goal: {goal_id}")
 
+        recording_mode = str(self.get_parameter("recording_mode").value).strip().lower()
+        if recording_mode not in ("full", "no_process", "no_save"):
+            self.get_logger().warn(
+                f"Unknown recording_mode '{recording_mode}'; falling back to 'full'"
+            )
+            recording_mode = "full"
+
+        if recording_mode == "no_process":
+            return self._execute_no_process(goal_handle, goal_id)
+
+        save_files = recording_mode != "no_save"
+
         # 準備
         topic = str(self.get_parameter("state_topic").value)
-        out_dir = self._prepare_output_dir()
-        ctx = RecordingContext(goal_id, topic, out_dir)
+        out_dir = self._prepare_output_dir() if save_files else None
+        ctx = RecordingContext(goal_id, topic, out_dir, save_files=save_files)
 
         self._save_plan_yaml(ctx, goal_handle.request)
 
@@ -251,7 +278,7 @@ class TrajFollowRecordActionServer(Node):
             ctx.started = True
             ctx.start_time = self.get_clock().now().nanoseconds * 1e-9
 
-            if self._record_bag_all:
+            if self._record_bag_all and ctx.save_files:
                 self._start_bag_record_all(ctx)
 
             fb_msg = AnalyzeTrajectory.Feedback()
@@ -291,6 +318,32 @@ class TrajFollowRecordActionServer(Node):
                     del self._active_recordings[goal_id]
             self.get_logger().info(f"Finished goal: {goal_id}")
 
+    def _execute_no_process(self, goal_handle, goal_id: str):
+        """
+        recording_mode='no_process' 用の実行パス。
+        アクションのリクエストは受け付けるが、購読・記録・保存を一切行わない。
+        """
+        self.get_logger().info(
+            f"[{goal_id}] recording_mode=no_process: accepting goal without recording"
+        )
+
+        fb_msg = AnalyzeTrajectory.Feedback()
+        fb_msg.status = "no_process mode: recording disabled"
+        goal_handle.publish_feedback(fb_msg)
+
+        while rclpy.ok() and not goal_handle.is_cancel_requested:
+            time.sleep(0.05)
+
+        if goal_handle.is_cancel_requested:
+            fb_msg.status = "cancel_requested: no-op"
+            goal_handle.publish_feedback(fb_msg)
+            goal_handle.canceled()
+
+        result = AnalyzeTrajectory.Result()
+        result.ok = True
+        self.get_logger().info(f"[{goal_id}] no_process mode: nothing recorded or saved")
+        return result
+
     # ---------------------------
     # Output directory & plan save
     # ---------------------------
@@ -326,6 +379,15 @@ class TrajFollowRecordActionServer(Node):
         return obj
 
     def _save_plan_yaml(self, ctx: RecordingContext, goal_msg: AnalyzeTrajectory.Goal):
+        if not ctx.save_files:
+            # save_files=False の場合はファイル・フォルダを一切作成せず、
+            # メモリ上の処理に必要な軌道データの抽出のみ行う
+            self.get_logger().info(
+                f"[{ctx.goal_id}] save_files=False: skipping plan yaml save and directory operations"
+            )
+            self._extract_plan_trajectory(ctx, goal_msg.plan)
+            return
+
         data = {
             "time_scaling": [float(x) for x in goal_msg.time_scaling],
             "velocity_scaling": [float(x) for x in goal_msg.velocity_scaling],
@@ -335,12 +397,12 @@ class TrajFollowRecordActionServer(Node):
         with open(ctx.out_plan, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
         self.get_logger().info(f"Saved plan: {ctx.out_plan}")
-        
+
         # スケーリング値をログ出力とフォルダ名に含める
         time_scale = data['time_scaling'][0] if data['time_scaling'] else 1.0
         vel_scale = data['velocity_scaling'][0] if data['velocity_scaling'] else 0.0
         acc_scale = data['acceleration_scaling'][0] if data['acceleration_scaling'] else 0.0
-        
+
         self.get_logger().info(f"Scaling values - time: {time_scale:.3f}, velocity: {vel_scale:.3f}, accel: {acc_scale:.3f}")
 
         # ── マスターセッションディレクトリを最初のrunのみスケーリング値でリネーム ──
@@ -365,22 +427,22 @@ class TrajFollowRecordActionServer(Node):
 
         # run_YYYYMMDD_HHMMSS_tXXX_vXXX_aXXX の形式
         new_dir = os.path.join(parent_dir, f"{base_name}_t{time_scale:.3f}_v{vel_scale:.3f}_a{acc_scale:.3f}")
-        
+
         try:
             os.rename(old_dir, new_dir)
             ctx.out_dir = new_dir
-            
+
             # 全てのパスを更新
             ctx.out_png = os.path.join(ctx.out_dir, "plot.png")
             ctx.out_csv = os.path.join(ctx.out_dir, "data.csv")
             ctx.out_plan = os.path.join(ctx.out_dir, "plan.yaml")
             ctx.out_plan_csv = os.path.join(ctx.out_dir, "plan.csv")
             ctx.bag_dir = os.path.join(ctx.out_dir, "bag")
-            
+
             self.get_logger().info(f"Renamed output dir to: {ctx.out_dir}")
         except Exception as e:
             self.get_logger().warn(f"Failed to rename directory with scaling values: {e}")
-        
+
         # ===== planから軌道データを抽出 =====
         self._extract_plan_trajectory(ctx, goal_msg.plan)
 
@@ -623,6 +685,12 @@ class TrajFollowRecordActionServer(Node):
     def _finalize_and_save(self, ctx: RecordingContext) -> Tuple[bool, str]:
         if len(ctx.t) == 0:
             return False, "No samples recorded; nothing saved."
+
+        if not ctx.save_files:
+            return True, (
+                f"save_files=False: processed {len(ctx.t)} samples in memory; "
+                "no folder or file was created."
+            )
 
         # ===== データを辞書形式に変換 =====
         data = {
